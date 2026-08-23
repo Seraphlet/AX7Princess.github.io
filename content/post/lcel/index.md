@@ -68,3 +68,12 @@ chain = prompt | model | parser   # 一条链
 ```
 类比工厂流水线。prompt 是"配料机"（把问题变成消息格式），model 是"加工机"（LLM 思考），parser 是"包装机"（把 AI 的复杂输出变成纯文本）。| 就是传送带——配料出来自动进加工机，加工完自动进包装机。
 
+PromptInput            ← 入口：你传的 {"question": "..."}（dict）
+     ↓
+ChatPromptTemplate     ← 配料机：dict → [system, user] 消息列表
+     ↓
+ChatOpenAI             ← 加工机：消息 → AIMessage
+     ↓
+StrOutputParser        ← 包装机：AIMessage → 纯字符串
+     ↓
+StrOutputParserOutput  ← 出口：str
