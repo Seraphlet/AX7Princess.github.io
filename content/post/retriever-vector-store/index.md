@@ -43,3 +43,9 @@ retriever 的输出自动塞进 prompt 的 {context} 占位符——你 D2 学�
 k=2：召回几条
 score_threshold=0.3：相似度低于这个值的不要
 
+最重要：和你 W3 的记忆同源
+任务表原话：RAG 的"知识库"本质就是 W3 的"长期向量记忆（Chroma）"——今天练的 retriever，之后可以直接复用 W3 的 LongTermMemory，不必另起炉灶 
+W4_D4任务表.md
+。
+
+你 W3 的 LongTermMemory.recall(query, k=3) 就是"取货员"，只是它返回 list[str]，LangChain 要的是 list[Document]——包一层就行。
