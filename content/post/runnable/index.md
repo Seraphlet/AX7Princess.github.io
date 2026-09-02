@@ -6,9 +6,9 @@ date: "2026-08-24T00:12:57+08:00"
 slug: "Runnable"
 categories:
  - Agent
- - LaangChain
+ - LangChain
 tags:
- - 
+ - null
 image: ""
 ---
 
