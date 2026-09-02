@@ -5,16 +5,13 @@ draft: false
 date: "2026-08-18T14:52:23+08:00"
 slug: "compress"
 categories:
- - Agen't
+ - Agent
 tags:
  - memory
 image: ""
 ---
 
 # 把老历史浓缩成一条线：滚动摘要式上下文压缩的设计复盘
-
-> W3-Day4 · 上下文压缩
-> 昨天做完本地化持久化，今天解决另一个问题：对话越聊越长，context window 装不下了怎么办。
 
 ## 一、先搞清楚：为什么要压缩
 
