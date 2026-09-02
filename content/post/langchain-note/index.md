@@ -1,6 +1,6 @@
 ---
 description: ""
-title: "LangChain"
+title: "LangChain总览"
 draft: false
 date: "2026-08-25T07:56:58+08:00"
 slug: "LangChain-Note"
