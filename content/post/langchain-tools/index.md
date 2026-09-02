@@ -12,21 +12,6 @@ tags:
 image: ""
 ---
 
----
-title: "W4-D5 · Retriever 转正 + Tool 调用：把 W3 的记忆和 W2 的工具全部接进 LangChain"
-slug: "lc-tools-retriever"
-date: 2026-09-01
-description: "D4 收尾：把 RunnableLambda 手工包的假 retriever 升级成官方 BaseRetriever 子类；D5 正篇：用 @tool + bind_tools 把 W2 手写的 fc_loop 翻译成框架标准写法，含三个工具的完整实战与五个踩坑。"
-categories:
-  - Agent
-  - LangChain
-tags:
-  - LCEL
-  - BaseRetriever
-  - bind_tools
-  - Function Calling
-  - DeepSeek
----
 
 # W4-D5 · Retriever 转正 + Tool 调用
 
