@@ -8,7 +8,7 @@ categories:
  - LangGraph
  - Pydantic
 tags:
- - 
+ - null
 image: ""
 ---
 
@@ -247,14 +247,11 @@ print(final["counter"])         # 2  →  无 reducer：n2 覆盖了 n1 的 1
 
 > **类比**：`messages` 是**聊天记录本**（只许往下加页）；`counter` 是**便利贴**（新写的盖掉旧的）。同一个节点返回 dict，两个字段走了完全不同的合并路径。
 
-### 5.3 自定义 reducer：你自己写的函数也能当
+### 5.3 自定义 reducer：累加 vs 覆盖的终极对照
 
 reducer 不必是框架给的。规则只有一个：**接收 `(当前值, 新值)`，返回合并结果**。
 
 ```python
-from typing import Annotated
-from pydantic import BaseModel, Field
-
 # 计数器：每个节点返回 {"visits": 1}，就会在现值上 +1
 def increment(current: int, new: int) -> int:
     return current + new
@@ -262,11 +259,47 @@ def increment(current: int, new: int) -> int:
 # 日志：字符串列表拼接
 def add_log(current: list[str], new: list[str]) -> list[str]:
     return current + new
-
-class CountState(BaseModel):
-    visits: Annotated[int, increment] = 0                  # 累加
-    log: Annotated[list[str], add_log] = Field(default_factory=list)
 ```
+
+**用一张小图同时验证三种字段行为**——这是 D5 收尾的"终极对照"，一个文件跑完，三行输出把概念钉死：
+
+```python
+from typing import Annotated
+from pydantic import BaseModel, Field
+from langgraph.graph import StateGraph, START, END
+
+class CounterState(BaseModel):
+    visits: Annotated[int, increment] = 0                     # 有 reducer → 累加
+    log: Annotated[list[str], add_log] = Field(default_factory=list)   # 有 reducer → 拼接
+    plain: int = 0                                            # 无 reducer → 覆盖（对照组）
+
+def step1(state: CounterState) -> dict:
+    return {"visits": 1, "log": ["step1 执行了"], "plain": 1}
+
+def step2(state: CounterState) -> dict:
+    return {"visits": 1, "log": ["step2 执行了"], "plain": 2}
+
+b = StateGraph(CounterState)
+b.add_node("step1", step1)
+b.add_node("step2", step2)
+b.add_edge(START, "step1"); b.add_edge("step1", "step2"); b.add_edge("step2", END)
+g = b.compile()
+
+final = g.invoke({})
+print("visits:", final["visits"])   # 2    ← step1 +1，step2 再 +1（increment 累加）
+print("log:", final["log"])          # ['step1 执行了', 'step2 执行了']（add_log 拼接）
+print("plain:", final["plain"])      # 2    ← 无 reducer，step2 覆盖了 step1 的 1
+```
+
+**看这三个输出，一整章的知识浓缩成一行对照**：
+
+```fallback
+  visits: 2     increment（自定义 reducer）→ 每个节点写 1 都累加 → 计步器
+  log: 两条      add_log（自定义 reducer）  → 每次都追加 → 聊天记录本
+  plain: 2      普通字段（无 reducer）      → 后写覆盖 → 便利贴
+```
+
+> **类比**：`increment` 是**计步器**（走一步 +1，累计）；普通字段是**便利贴**（新写的盖旧）。同一个字段，一个累加、一个覆盖——**想要哪种行为，取决于你有没有给字段加 `Annotated`**。
 
 **为什么你需要自定义 reducer**：见第八章那个真实排查——普通字段没法"每次节点路过都计数"，计数器必须用 reducer。
 
