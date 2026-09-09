@@ -12,9 +12,7 @@ tags:
 image: ""
 ---
 
-
-
-# W4-D5 · Retriever 转正 + Tool 调用
+# W4-D4 · Retriever 转正 + Tool 调用
 
 > **关键词**：`BaseRetriever` / `@tool` / `bind_tools` / `create_retriever_tool` / 工具调用循环
 > **前置**：W1 `llm_client`、W2 `fc_loop`、W3 `MemoryManager`、W4-D1~D3（LCEL 三件套 + 组合件）
