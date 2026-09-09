@@ -5,12 +5,11 @@ draft: false
 date: "2026-09-09T11:06:52+08:00"
 slug: "hitl"
 categories:
- - 
+ - LangGraph
 tags:
- - 
+ - HITL
 image: ""
 ---
-
 
 # W6-D3 · 让图停下来问人：HITL 的 interrupt 与 Command
 
