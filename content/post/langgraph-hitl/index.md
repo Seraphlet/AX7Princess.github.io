@@ -1,6 +1,6 @@
 ---
-description: ""
-title: " LangGraph_HITL"
+description: "D4"
+title: "从让图停下来，到回到过去"
 draft: false
 date: "2026-09-10T09:54:52+08:00"
 slug: "LangGraph_HITL"
@@ -11,1433 +11,103 @@ tags:
 image: ""
 ---
 
-# 让图停下来问人
+# W6-D4 · 从让图停下来，到回到过去
 
-> 这篇是我这阶段最难的一篇。
+> D3 学的是：
 >
-> 难点不是 `interrupt()` API 本身，而是几个东西会同时发生：
+> **怎么让图停下来问人。**
+>
+> D4 是同一天的第二份代码。
+>
+> 今天不再往 HITL 上堆新按钮，而是顺着 D3 往前走一步：
 >
 > ```text
-> 模型产生 tool_call
-> ↓
+> D3：
 > 图停下来
 > ↓
-> 人审批
+> 人回答
 > ↓
-> 人可能修改参数
+> 从 checkpoint 继续
+>
+> D4：
+> 图已经有 checkpoint
 > ↓
-> 工具执行
+> 我能不能自己挑一个过去的 checkpoint？
 > ↓
-> 模型还要知道“为什么参数变了”
-> ↓
-> 最后还得防止模型再次调用工具
+> 从那里重新跑？
 > ```
 >
-> 所以这篇我不追求把代码写得多短。
+> 答案是：
 >
-> 我希望以后再忘记 HITL 的时候，可以直接顺着代码一块一块看回来。
+> **可以。**
+>
+> 这就是 LangGraph 的 Time Travel。
 
 ---
 
-# 一、先看今天最终要做成什么
+# 一、先看今天到底学什么
 
-目标非常简单：
+今天的实验故意不用 LLM。
 
-```text
-用户
- ↓
-decide
- ↓
-模型产生 tool_call
- ↓
-approve
- ↓
-人审批
- ↓
-┌───────────────┐
-│ approve       │
-│ reject        │
-│ edit          │
-└───────────────┘
- ↓
-tools
- ↓
-audit
- ↓
-summarize
- ↓
-END
-```
+因为我真正想验证的不是：
 
-五个节点各干一件事：
-
-| 节点          | 职责            |
-| ----------- | ------------- |
-| `decide`    | 模型决定要调用什么工具   |
-| `approve`   | 暂停，问人         |
-| `tools`     | 真正执行工具        |
-| `audit`     | 记录“这是人改的”     |
-| `summarize` | 最后总结，而且没有工具权限 |
-
-先记住这个骨架。
-
-后面所有代码都只是把这张图实现出来。
-
----
-
-# 二、第一块：工具
-
-```python
-@tool
-def delete_file(path: str) -> str:
-    print(f">>> 工具真身执行：删除 {path}")
-    return f"文件已删除：{path}"
-```
-
-这其实没什么特殊的。
-
-为了学习，我故意不真的删除文件。
-
-真正重要的是这行：
-
-```python
-print(f">>> 工具真身执行：删除 {path}")
-```
-
-因为我需要知道：
-
-> **工具到底什么时候真的执行了。**
-
-以后测试 HITL 时，我不能只看最后的结果。
-
-我还需要观察：
-
-```text
-“工具执行”这件事，
-到底发生在审批前还是审批后？
-```
-
-所以这个 `print` 其实就是我们后面的一个判据。
-
----
-
-# 三、第二块：State
-
-```python
-class S(TypedDict):
-    messages: Annotated[list, add_messages]
-    audit_note: str
-```
-
-这里有两个字段。
-
-## `messages`
-
-整个对话和工具执行历史：
-
-```text
-用户消息
-模型消息
-tool_call
-ToolMessage
-审计记录
-最终总结
-```
-
-所以它可以理解成：
-
-> **主 transcript。**
-
----
-
-## `audit_note`
-
-这是专门为了 HITL 加的。
-
-原因后面会看到：
-
-> 人可能在图外修改参数。
-
-但是：
-
-```text
-图外的人做了什么
-```
-
-不会自动出现在：
-
-```text
-messages
-```
-
-所以我们需要一个地方暂时保存：
-
-```text
-“审批人把 a.txt 改成了 old.txt”
-```
-
-这个地方就是：
-
-```python
-audit_note
-```
-
----
-
-# 四、第三块：为什么要两个 LLM？
-
-这里是整个代码第一个特别值得注意的地方。
-
-```python
-llm_decide = ChatOpenAI(...).bind_tools(
-    [delete_file]
-)
-
-llm_summarize = ChatOpenAI(...)
-```
-
-两个模型看起来差不多。
-
-但权限完全不同。
-
-## `llm_decide`
-
-```python
-.bind_tools([delete_file])
-```
-
-代表：
-
-> **它拥有工具箱。**
-
-它可以产生：
-
-```text
-tool_calls
-```
-
-所以它负责：
-
-> “我想做什么？”
-
----
-
-## `llm_summarize`
-
-它没有：
-
-```python
-.bind_tools(...)
-```
-
-所以它没有能力产生工具调用。
-
-它只负责：
-
-> “事情最后怎么样了？”
-
-这个设计是后面“结构收口”的关键。
-
-先不用急着记，后面看到 `summarize` 就会明白。
-
----
-
-# 五、第四块：`decide` —— 先让模型产生工单
-
-代码：
-
-```python
-def decide(state: S) -> dict:
-    ai_msg = llm_decide.invoke(
-        state["messages"]
-    )
-
-    print(
-        f"[decide] tool_calls="
-        f"{len(ai_msg.tool_calls)}"
-    )
-
-    return {
-        "messages": [ai_msg]
-    }
-```
-
-这里看起来非常普通。
-
-但有一个非常关键的动作：
-
-```python
-return {
-    "messages": [ai_msg]
-}
-```
-
-这一步意味着：
-
-> **模型刚才产生的 AIMessage 真正进入了 state。**
-
-例如模型决定：
-
-```text
-delete_file("/tmp/a.txt")
-```
-
-state 里就会有：
-
-```text
-AIMessage
-└── tool_calls
-    └── delete_file
-        └── path = /tmp/a.txt
-```
-
-这时候工具还没有执行。
-
-所以现在可以把它理解成：
-
-> **模型已经填好了一张待执行工单。**
-
----
-
-# 六、第五块：我第一次真正卡住的地方——为什么不能把 `interrupt()` 直接写在这里？
-
-最自然的代码其实是：
-
-```python
-def agent(state):
-    ai_msg = llm.invoke(...)
-
-    answer = interrupt(
-        "确定吗？"
-    )
-
-    return {
-        "messages": [ai_msg]
-    }
-```
-
-乍一看没问题。
-
-我当时的脑子也是这么想的：
-
-```text
-LLM
- ↓
-拿到 ai_msg
- ↓
-暂停
- ↓
-人回答
- ↓
-继续 return
-```
-
-但这是错误的。
-
----
-
-# 七、`interrupt()` 不是普通的 Python 暂停
-
-第一次执行：
-
-```python
-answer = interrupt(...)
-```
-
-时，LangGraph 会让当前节点暂停。
-
-所以真实过程是：
-
-```text
-agent
- ↓
-llm.invoke()
- ↓
-ai_msg 只存在局部变量里
- ↓
-interrupt()
- ↓
-节点停止
-```
-
-注意：
-
-```python
-return {
-    "messages": [ai_msg]
-}
-```
-
-还没执行。
-
-所以：
-
-> **`ai_msg` 虽然已经计算出来，但还没有进入 state。**
-
-这就是我第一次写 HITL 时的根本问题。
-
----
-
-# 八、所以必须拆成两个节点
-
-正确结构：
-
-```text
-decide
- ↓
-return AIMessage
- ↓
-state 已经有 tool_call
- ↓
-approve
- ↓
-interrupt()
-```
-
-所以：
-
-```python
-def decide(state: S) -> dict:
-    ai_msg = llm_decide.invoke(
-        state["messages"]
-    )
-
-    return {
-        "messages": [ai_msg]
-    }
-```
-
-然后：
-
-```python
-def approve(state: S) -> dict:
-    last = state["messages"][-1]
-
-    tc = last.tool_calls[0]
-
-    answer = interrupt({
-        ...
-    })
-```
-
-这样就非常清楚了：
-
-### `decide`
-
-负责：
-
-> **产生工单并落 state。**
-
-### `approve`
-
-负责：
-
-> **拿 state 里的工单问人。**
-
-所以拆节点不是为了代码好看。
-
-而是因为：
-
-> **我必须先让 tool_call 成为 state，后面的人才能看到并修改它。**
-
----
-
-# 九、`approve` 到底在看什么？
-
-代码：
-
-```python
-last = state["messages"][-1]
-
-if not (
-    isinstance(last, AIMessage)
-    and last.tool_calls
-):
-    return {}
-
-tc = last.tool_calls[0]
-```
-
-这里不要把它想复杂。
-
-就是：
-
-```text
-state
- ↓
-拿最后一条消息
- ↓
-确认它是 AIMessage
- ↓
-确认里面有 tool_calls
- ↓
-拿出 tool_call
-```
-
-如果：
-
-```text
-tc["args"]
-```
-
-是：
-
-```python
-{
-    "path": "/tmp/a.txt"
-}
-```
-
-那么审批问题就是：
-
-```text
-模型想删除 /tmp/a.txt，批准吗？
-```
-
----
-
-# 十、真正让图停下来的是 `interrupt()`
-
-```python
-answer = interrupt({
-    "question": "...",
-    "options": [
-        "approve",
-        "reject",
-        "edit",
-    ],
-})
-```
-
-第一次执行时：
-
-```text
-interrupt()
- ↓
-暂停
-```
-
-这时候：
-
-```python
-graph.get_state(cfg)
-```
-
-就可以去看看 checkpoint。
-
-而恢复时：
-
-```python
-graph.invoke(
-    Command(resume="approve"),
-    cfg,
-)
-```
-
-`"approve"` 会成为：
-
-```python
-answer
-```
-
-的值。
-
-所以：
-
-```python
-answer = interrupt(...)
-```
-
-你可以把它理解成：
-
-> **“我现在向图外问一个问题，以后这里会拿到一个答案。”**
-
----
-
-# 十一、最容易记错的地方：恢复以后节点会重跑
-
-这个必须单独记住。
-
-第一次：
-
-```text
-approve()
- ↓
-print("[approve]")
- ↓
-interrupt()
- ↓
-停
-```
-
-恢复：
-
-```text
-approve()
- ↓
-print("[approve]")
- ↓
-interrupt()
- ↓
-得到 "approve"
- ↓
-继续
-```
-
-所以你可能看到：
-
-```text
-[approve]
-[approve]
-```
-
-出现两次。
-
-这不是 Bug。
-
-因为恢复时，节点会重新执行，然后在原来的 `interrupt()` 位置拿到已经提供的答案。
-
-所以：
-
-> **`interrupt()` 前面的代码必须能够安全重跑。**
-
----
-
-# 十二、所以 interrupt 前最怕什么？
-
-比如：
-
-```python
-def approve(state):
-
-    charge_card()
-
-    answer = interrupt(
-        "确认付款吗？"
-    )
-```
-
-第一次：
-
-```text
-扣款
- ↓
-interrupt
- ↓
-停
-```
-
-恢复：
-
-```text
-重新进入 approve
- ↓
-再次扣款
- ↓
-interrupt
- ↓
-继续
-```
-
-可能就扣两次。
-
-所以 interrupt 前适合：
-
-```text
-读取 state
-纯计算
-构建问题
-打印日志
-```
-
-不适合随便放：
-
-```text
-扣款
-发邮件
-写数据库
-创建订单
-调用外部副作用 API
-```
-
-我自己的记忆：
-
-> **interrupt 前可以想，可以读；不要随便动现实世界。**
-
----
-
-# 十三、三态审批：为什么要有 `edit`？
-
-如果只有：
-
-```text
-approve
-reject
-```
-
-人只能：
-
-```text
-同意
-拒绝
-```
-
-但现实里经常是：
-
-> “可以，但参数错了。”
-
-所以：
-
-```text
-approve
-reject
-edit
-```
-
-变成：
-
-| 选择        | 含义      |
-| --------- | ------- |
-| `approve` | 原参数直接执行 |
-| `reject`  | 不执行     |
-| `edit`    | 修改参数后执行 |
-
-这里的“edit”才是 D4 真正的核心。
-
----
-
-# 十四、人修改的到底是什么？
-
-假设 state 里已经有：
-
-```python
-last.tool_calls
-```
-
-内容：
-
-```python
-[
-    {
-        "name": "delete_file",
-        "args": {
-            "path": "/tmp/a.txt"
-        }
-    }
-]
-```
-
-工具还没有跑。
-
-所以我们现在改的不是：
-
-```text
-“已经删除的文件”
-```
+> “模型会说什么。”
 
 而是：
 
-> **下一步准备执行的工单。**
+> **“到底哪些节点被重新执行了？”**
 
-于是：
-
-```python
-new_tool_calls = [
-    {
-        **tc,
-        "args": {
-            **tc["args"],
-            "path": "/tmp/old.txt",
-        },
-    }
-    for tc in last.tool_calls
-]
-```
-
-就是把：
+所以把图简化成：
 
 ```text
-/tmp/a.txt
+START
+  ↓
+  A
+  ↓
+  B
+  ↓
+  C
+  ↓
+ END
 ```
 
-换成：
+完整跑一次以后，LangGraph 会留下多个 checkpoint。
 
-```text
-/tmp/old.txt
+于是我现在可以：
+
+```text id="xq9c1m"
+历史：
+
+START → A → B → C → END
+          ↑
+       这个 checkpoint
 ```
+
+然后从这里重新跑：
+
+```text id="x9m2ax"
+checkpoint
+   ↓
+   B
+   ↓
+   C
+```
+
+**A 不应该再跑。**
+
+这就是今天最重要的验证目标。
 
 ---
 
-# 十五、为什么不是直接修改原来的消息？
+# 二、完整代码先看一遍
 
-这里又有一个非常容易忽略的细节：
+今天的实验代码很短。
 
-```python
-fixed = AIMessage(
-    id=last.id,
-    content=last.content,
-    tool_calls=new_tool_calls,
-)
-```
+```python id="u3pm8a"
+"""W6-D4：时间旅行 —— Replay + Fork"""
 
-最重要的是：
-
-```python
-id=last.id
-```
-
-因为：
-
-```python
-messages: Annotated[list, add_messages]
-```
-
-不是简单的：
-
-```python
-messages.append(...)
-```
-
-它会根据 message id 处理更新。
-
-所以：
-
-```text
-相同 id
-→ 更新原消息
-```
-
-而：
-
-```text
-没有旧 id
-→ 更像新增一条消息
-```
-
-我应该把它记成：
-
-> **我要改工单，不是再新建一张工单。**
-
-所以：
-
-```python
-id=last.id
-```
-
-不能随手删。
-
----
-
-# 十六、`edit` 为什么没有 `if answer == "edit"`？
-
-代码：
-
-```python
-if answer == "reject":
-    return {
-        "messages": [
-            AIMessage(
-                content="已取消删除..."
-            )
-        ]
-    }
-
-return {}
-```
-
-你会发现：
-
-```text
-approve
-edit
-```
-
-都走：
-
-```python
-return {}
-```
-
-这是故意的。
-
-因为：
-
-```text
-edit
-```
-
-真正发生的事情是：
-
-```text
-图外
- ↓
-get_state()
- ↓
-修改 tool_calls
- ↓
-update_state()
- ↓
-resume("edit")
-```
-
-所以 `approve` 节点根本不负责编辑。
-
-它只是一个：
-
-> **审批闸门。**
-
-可以这样记：
-
-```text
-reject
-→ 拦住
-
-approve
-→ 放行
-
-edit
-→ 参数已经在图外改好了
-→ 放行
-```
-
----
-
-# 十七、`update_state()`：真正的“改档”
-
-这行：
-
-```python
-graph.update_state(
-    cfg,
-    {
-        "messages": [fixed],
-        "audit_note": "...",
-    },
-)
-```
-
-不要把它理解成：
-
-> “修改某个正在运行的 Python 变量。”
-
-更准确的理解是：
-
-> **直接修改 checkpoint 对应的 state。**
-
-也就是：
-
-```text
-暂停
- ↓
-拿到 checkpoint
- ↓
-修改 checkpoint state
- ↓
-继续
-```
-
-所以它更像：
-
-> **图外的编辑器。**
-
-而：
-
-```python
-Command(resume="edit")
-```
-
-只是告诉：
-
-```python
-answer = interrupt(...)
-```
-
-> “人的答案是 edit。”
-
-这两个动作不是一个东西。
-
----
-
-# 十八、这里顺便记住 `resume` 和 `update_state` 的区别
-
-这是我这次口述里最容易混淆的地方。
-
-### `resume`
-
-```text
-图内传值
-```
-
-比如：
-
-```python
-Command(resume="approve")
-```
-
-最后成为：
-
-```python
-answer = "approve"
-```
-
----
-
-### `update_state`
-
-```text
-图外改档
-```
-
-比如：
-
-```python
-graph.update_state(
-    cfg,
-    {"path": "/tmp/old.txt"}
-)
-```
-
-它直接修改 state。
-
-所以：
-
-> **`resume` 是“把答案传回去”；`update_state` 是“直接改存档”。**
-
-不要把这两个概念混起来。
-
----
-
-# 十九、为什么还需要 `audit`？
-
-现在人已经把：
-
-```text
-/tmp/a.txt
-```
-
-改成：
-
-```text
-/tmp/old.txt
-```
-
-但模型并不知道：
-
-> **这是人改的。**
-
-如果最后只看到：
-
-```text
-用户：
-删除 a.txt
-
-AI：
-我要调用 a.txt
-
-工具：
-old.txt 删除成功
-```
-
-模型很可能疑惑：
-
-> “为什么最后变成 old.txt 了？”
-
-甚至可能觉得：
-
-> “是不是我自己犯错了？”
-
-所以加入：
-
-```python
-audit_note
-```
-
-记录：
-
-```text
-审批人把删除目标从 a.txt 改成 old.txt
-```
-
-然后 `audit` 把这件事情重新加入 transcript。
-
-这就是：
-
-> **给模型补一段缺失的因果链。**
-
----
-
-# 二十、为什么我叫它“治叙事”？
-
-因为 Agent 最容易出现的一种问题是：
-
-```text
-上下文前后不一致
-```
-
-而模型不知道真正原因时，很容易自己解释。
-
-例如：
-
-```text
-用户要 A
-模型原本准备 A
-工具最后执行 B
-```
-
-如果没人告诉模型：
-
-> “是审批人把 A 改成 B。”
-
-它就可能开始自己编故事。
-
-所以 `audit` 的作用不是让模型更聪明。
-
-而是：
-
-> **防止模型因为不知道中间发生过什么，而自己补一个错误的故事。**
-
----
-
-# 二十一、最后一个坑：为什么 `summarize` 不绑工具？
-
-现在事情做完了。
-
-如果最后又让原来的：
-
-```python
-llm_decide
-```
-
-出来总结，那么它依然拥有：
-
-```text
-delete_file
-```
-
-它就可能：
-
-```text
-工具成功
- ↓
-模型看到结果
- ↓
-模型又产生 tool_call
- ↓
-再次执行
-```
-
-我们当然可以在 prompt 里说：
-
-```text
-“请不要再调用工具。”
-```
-
-但这只是：
-
-> **软约束。**
-
-Prompt 是说明书，不是锁。
-
-所以：
-
-```python
-llm_summarize = ChatOpenAI(
-    **_common
-)
-```
-
-故意不绑定工具。
-
-于是：
-
-```text
-tools
- ↓
-audit
- ↓
-summarize
- ↓
-END
-```
-
-最后这个模型：
-
-> **根本没有工具可以调用。**
-
-这就是：
-
-> **结构收口。**
-
----
-
-# 二十二、所以 `audit` 和 `summarize` 各自解决一个问题
-
-这两个不要混：
-
-```text
-audit
-→ 模型为什么看到不同参数？
-→ 治叙事
-
-summarize 无工具
-→ 模型为什么不能再执行？
-→ 治重试
-```
-
-一个解决：
-
-> **理解。**
-
-一个解决：
-
-> **能力。**
-
----
-
-# 二十三、补一个容易混的东西：`thread_id` 和 `checkpoint_id`
-
-以后看 HITL 和 Time Travel，会经常看到两个 id。
-
-千万别混。
-
-```text
-thread_id
-=
-哪一条 thread
-=
-哪个会话 / 存档槽
-```
-
-而：
-
-```text
-checkpoint_id
-=
-这一条 thread 的哪一帧
-=
-哪个历史 checkpoint
-```
-
-可以记成：
-
-```text
-thread_id
-→ 账户号
-
-checkpoint_id
-→ 交易流水号
-```
-
-所以：
-
-> **身份是 `thread_id`，时间是 `checkpoint_id`。**
-
----
-
-# 二十四、再补一个容易混的东西：`interrupt_before`
-
-`interrupt_before` 和 `interrupt()` 也不要混成“两个暂停 API”。
-
-更准确地说：
-
-|                         | `interrupt_before`     | `interrupt()`           |
-| ----------------------- | ---------------------- | ----------------------- |
-| 停在哪里                    | 节点边界                   | 节点内部                    |
-| `Command(resume=value)` | ❌                      | ✅                       |
-| `update_state()`        | ✅                      | ✅                       |
-| 恢复方式                    | `invoke(None, config)` | `Command(resume=value)` |
-
-所以：
-
-```text
-interrupt_before
-没有 resume
-```
-
-不等于：
-
-```text
-不能 update_state
-```
-
-两者是两个维度。
-
----
-
-# 二十五、最后一个非常重要的判据：`state.next`
-
-很多时候我会说：
-
-> “图好像停下来了。”
-
-以后不要猜。
-
-直接：
-
-```python
-state = graph.get_state(config)
-
-print(state.next)
-```
-
-判断：
-
-```text
-next == ()
-→ 图结束
-
-next != ()
-→ 还有下一步
-```
-
-比如：
-
-```text
-interrupt_before["tools"]
-```
-
-停下时：
-
-```text
-next == ("tools",)
-```
-
-表示：
-
-> tools 还没跑。
-
-而：
-
-```text
-interrupt()
-```
-
-如果写在：
-
-```text
-agent
-```
-
-里面，那么暂停时：
-
-```text
-next == ("agent",)
-```
-
-表示：
-
-> agent 本身还没有完成。
-
-所以 `.next` 是非常好用的“状态判据”。
-
----
-
-# 二十六、现在把整条链重新看一遍
-
-```text
-用户
- ↓
-decide
- ↓
-AIMessage(tool_calls)
- ↓
-approve
- ↓
-interrupt()
- ↓
-人
- │
- ├── reject
- │     ↓
- │    END
- │
- ├── approve
- │     ↓
- │    tools
- │
- └── edit
-       ↓
-    update_state
-       ↓
-    resume("edit")
-       ↓
-      tools
-       ↓
-      audit
-       ↓
-   summarize
-       ↓
-      END
-```
-
-这张图其实就是今天全部内容。
-
----
-
-# 二十七、我最后真正记住的是这 7 句话
-
-```text
-1. decide 先把 AIMessage 写进 state，再 interrupt。
-
-2. interrupt() 恢复时，所在节点会重新执行。
-
-3. 人修改的是 pending tool_calls，而不是工具执行结果。
-
-4. 修改已有消息时，要保留原 message id。
-
-5. audit 解决“模型不知道人为什么改参数”。
-
-6. summarize 不绑工具，解决“模型执行后继续重试”。
-
-7. thread_id 是身份，checkpoint_id 是时间。
-```
-
-再补一句：
-
-> **`resume` 是图内传值，`update_state` 是图外改档。**
-
----
-
-# 二十八、完整源码
-
-下面是这篇真正对应的完整源码。
-
-代码故意保持“学习版”风格：
-
-> 注释多一点没关系，重要的是以后重新打开时，我能顺着代码看懂。
-
-```python
-"""
-LangGraph HITL 学习版
-====================
-
-目标：
-
-1. decide：模型产生 tool_call
-2. approve：interrupt() 问人
-3. 三态：
-   - approve
-   - reject
-   - edit
-4. edit：修改 pending tool_calls
-5. audit：记录人工修改
-6. summarize：最后不绑定工具，结构性收口
-
-注意：
-delete_file() 不会真的删除文件，
-只是用于观察 ToolNode 什么时候执行。
-"""
-
-import os
-
-from dotenv import load_dotenv
-
-load_dotenv(override=True)
-
-
-# ============================================================
-# LangGraph
-# ============================================================
+import io
+import contextlib
 
 from typing import Annotated, TypedDict
 
@@ -1448,568 +118,1585 @@ from langgraph.graph import (
 )
 
 from langgraph.graph.message import add_messages
-
 from langgraph.checkpoint.memory import MemorySaver
 
-from langgraph.prebuilt import ToolNode
 
-from langgraph.types import (
-    interrupt,
-    Command,
-)
+class T(TypedDict):
+    messages: Annotated[list, add_messages]
 
-
-# ============================================================
-# LangChain
-# ============================================================
-
-from langchain_core.tools import tool
-
-from langchain_core.messages import (
-    AIMessage,
-    HumanMessage,
-)
-
-from langchain_openai import ChatOpenAI
+    # 普通字段：
+    # 专门用来测试“改档以后未来会不会发生变化”
+    way: str
 
 
-# ============================================================
-# 1. 工具
-# ============================================================
+def step_a(state: T) -> dict:
+    print("→ A 执行")
 
-@tool
-def delete_file(path: str) -> str:
-    """
-    危险操作的学习版。
+    return {
+        "messages": [
+            ("ai", "A 完成")
+        ]
+    }
 
-    不真的删除文件，
-    只打印执行信息。
-    """
+
+def step_b(state: T) -> dict:
+    way = (
+        state.get("way")
+        or "默认方式"
+    )
 
     print(
-        f">>> 工具真身执行：删除 {path}"
+        f"→ B 执行 ({way})"
     )
 
-    return (
-        f"文件已删除：{path}"
+    return {
+        "messages": [
+            ("ai", f"B 完成 ({way})")
+        ]
+    }
+
+
+def step_c(state: T) -> dict:
+    print("→ C 执行")
+
+    return {
+        "messages": [
+            ("ai", "C 完成")
+        ]
+    }
+
+
+builder = StateGraph(T)
+
+builder.add_node("a", step_a)
+builder.add_node("b", step_b)
+builder.add_node("c", step_c)
+
+builder.add_edge(START, "a")
+builder.add_edge("a", "b")
+builder.add_edge("b", "c")
+builder.add_edge("c", END)
+
+graph = builder.compile(
+    checkpointer=MemorySaver()
+)
+
+
+cfg = {
+    "configurable": {
+        "thread_id": "tt-1"
+    }
+}
+
+
+# ① 先完整跑一遍
+log = io.StringIO()
+
+with contextlib.redirect_stdout(log):
+    r0 = graph.invoke(
+        {
+            "messages": [
+                (
+                    "user",
+                    "完整跑一遍 A B C"
+                )
+            ]
+        },
+        cfg,
     )
+
+print(
+    "原始跑完：",
+    log.getvalue()
+        .replace("\n", " | ")
+        .strip()
+)
+
+print(
+    "原始消息数：",
+    len(r0["messages"])
+)
+
+
+# ② 查看历史 checkpoint
+snaps = list(
+    graph.get_state_history(cfg)
+)
+
+for i, s in enumerate(snaps):
+
+    cid = (
+        s.config[
+            "configurable"
+        ][
+            "checkpoint_id"
+        ]
+    )
+
+    print(
+        f"#{i} "
+        f"cid={cid[:8]} "
+        f"next={s.next} "
+        f"消息数="
+        f"{len(s.values['messages'])}"
+    )
+
+
+# ③ 找到：
+#    A 已完成
+#    B 还没执行
+#
+#    也就是：
+#
+#    next == ("b",)
+
+target = next(
+    s
+    for s in snaps
+    if s.next == ("b",)
+)
+
+tcid = (
+    target.config[
+        "configurable"
+    ][
+        "checkpoint_id"
+    ]
+)
+
+
+# ④ Replay
+#
+# None = 不传新输入
+# target.config = 从这个 checkpoint 开始
+
+log2 = io.StringIO()
+
+with contextlib.redirect_stdout(log2):
+
+    r_replay = graph.invoke(
+        None,
+        target.config,
+    )
+
+txt_replay = log2.getvalue()
+
+print(
+    "回放日志：",
+    txt_replay
+        .replace("\n", " | ")
+        .strip()
+)
+
+
+# ⑤ Fork
+#
+# 从同一个历史 checkpoint
+# 修改 way
+
+new_cfg = graph.update_state(
+    target.config,
+    {
+        "way": "另一种方式"
+    },
+)
+
+log3 = io.StringIO()
+
+with contextlib.redirect_stdout(log3):
+
+    r_fork = graph.invoke(
+        None,
+        new_cfg,
+    )
+
+txt_fork = log3.getvalue()
+
+print(
+    "分叉日志：",
+    txt_fork
+        .replace("\n", " | ")
+        .strip()
+)
+
+
+# ⑥ 断言
+#
+# Replay：
+# B / C 必须出现
+# A 必须不能出现
+
+assert (
+    "→ B 执行 (默认方式)"
+    in txt_replay
+)
+
+assert (
+    "→ C 执行"
+    in txt_replay
+)
+
+assert (
+    "→ A 执行"
+    not in txt_replay
+)
+
+
+# Fork：
+# B 应该读到修改后的 way
+
+assert (
+    "→ B 执行 (另一种方式)"
+    in txt_fork
+)
+
+assert (
+    "→ A 执行"
+    not in txt_fork
+)
+
+
+# 不要检查 messages[-1]
+# 因为最后一条消息是 C。
+#
+# 应该检查 B 那条消息。
+
+fork_text = " | ".join(
+    str(m.content)
+    for m in r_fork["messages"]
+)
+
+assert (
+    "B 完成 (另一种方式)"
+    in fork_text
+)
+
+
+# 原 checkpoint 还应该存在
+snaps_after = list(
+    graph.get_state_history(cfg)
+)
+
+cids_after = [
+    s.config[
+        "configurable"
+    ][
+        "checkpoint_id"
+    ]
+    for s in snaps_after
+]
+
+assert tcid in cids_after
+
+assert (
+    len(snaps_after)
+    > len(snaps)
+)
+
+
+print(
+    "✅ 时间旅行实验通过"
+)
+```
+
+先不要急着理解每一行。
+
+只看：
+
+```text id="7g48ru"
+完整运行
+ ↓
+保存 checkpoint
+ ↓
+找到 B 前面的 checkpoint
+ ↓
+Replay
+ ↓
+Fork
+ ↓
+断言
+```
+
+这就是今天的骨架。
+
+---
+
+# 三、第一块：为什么实验故意不用 LLM？
+
+```python id="6p5lax"
+def step_a(state):
+    print("→ A 执行")
+```
+
+```python id="5d1l0c"
+def step_b(state):
+    print("→ B 执行")
+```
+
+```python id="7z8j51"
+def step_c(state):
+    print("→ C 执行")
+```
+
+这里没有模型，没有 API，没有随机性。
+
+因为我要证明：
+
+> **“Replay 到底跳过了哪些节点？”**
+
+如果 B/C 出现，A 没出现，我就能比较干净地证明：
+
+```text id="y6r29n"
+B、C 重跑
+A 没重跑
+```
+
+官方对 Replay 的定义也是：从历史 checkpoint 重新执行后续节点，checkpoint 之前的节点不重新执行。
+
+所以今天这个实验越简单越好。
+
+---
+
+# 四、第二块：为什么需要 `way`？
+
+```python id="3f0lhr"
+class T(TypedDict):
+    messages: Annotated[list, add_messages]
+    way: str
+```
+
+A/C 不关心 `way`。
+
+只有 B：
+
+```python id="12l1n7"
+way = (
+    state.get("way")
+    or "默认方式"
+)
+```
+
+然后打印：
+
+```text id="p2k5jx"
+→ B 执行 (默认方式)
+```
+
+这样我以后修改：
+
+```python id="6l1jpn"
+way = "另一种方式"
+```
+
+就可以观察：
+
+> **未来的 B 有没有真的发生变化。**
+
+所以：
+
+```text id="1d6dwy"
+way
+```
+
+不是业务需求。
+
+它只是一个：
+
+> **“改档到底有没有影响未来”的实验开关。**
+
+---
+
+# 五、第三块：第一次完整运行，制造历史
+
+```python id="qlinhs"
+graph.invoke(
+    {
+        "messages": [
+            (
+                "user",
+                "完整跑一遍 A B C"
+            )
+        ]
+    },
+    cfg,
+)
+```
+
+先让它完整跑：
+
+```text id="0r0k3x"
+A
+↓
+B
+↓
+C
+↓
+END
+```
+
+这一跑非常重要。
+
+因为：
+
+> **没有历史，就没有时间旅行。**
+
+现在 checkpoint 历史里应该已经保存了多个状态。
+
+---
+
+# 六、第四块：`get_state_history()` = 打开存档列表
+
+```python id="ehz4c1"
+snaps = list(
+    graph.get_state_history(cfg)
+)
+```
+
+这就是今天第一个新 API。
+
+它的意思：
+
+> **把这个 thread 的历史 checkpoint 全拿出来。**
+
+当前 LangGraph 文档说明，历史是按**新 → 旧**返回的。
+
+所以：
+
+```text id="0wzvzz"
+index = 0
+```
+
+不是最早。
+
+反而是：
+
+> **最新。**
+
+这就是一个特别容易记反的坑。
+
+---
+
+# 七、第五块：每个 checkpoint 只先看三个东西
+
+```python id="4d7hsg"
+s.config
+s.values
+s.next
+```
+
+这三个东西是今天最重要的。
+
+可以直接记：
+
+```text id="92qw7f"
+.config
+→ 钥匙
+
+.values
+→ 内容
+
+.next
+→ 待办
+```
+
+官方 `StateSnapshot` 也是这样定义的：`.values` 是当前状态值，`.next` 是下一步要执行的节点，`.config` 是读取该快照时使用的配置。
+
+---
+
+# 八、`next` 是今天挑档的关键
+
+假设时间线：
+
+```text id="7s2igx"
+START
+  ↓
+ A
+  ↓
+ B
+  ↓
+ C
+  ↓
+END
+```
+
+某个 checkpoint：
+
+```text id="v1db6u"
+A 已经完成
+B 还没开始
+```
+
+它的：
+
+```python id="vvk4py"
+s.next
+```
+
+就是：
+
+```python id="cw3v6n"
+("b",)
+```
+
+这句话其实非常好懂：
+
+> **下一步该执行 B。**
+
+所以我想：
+
+> “如果我要从 B 开始重跑，那就找 `next == ("b",)` 的 checkpoint。”
+
+于是：
+
+```python id="dq6vxv"
+target = next(
+    s
+    for s in snaps
+    if s.next == ("b",)
+)
+```
+
+这就是：
+
+> **挑档。**
+
+---
+
+# 九、为什么 `next == ()` 的档不要选？
+
+如果：
+
+```python id="f7ek31"
+s.next == ()
+```
+
+意思是：
+
+> **已经没有下一步。**
+
+也就是：
+
+```text id="lc3yz2"
+A
+↓
+B
+↓
+C
+↓
+END
+```
+
+已经全部完成。
+
+这个 checkpoint 拿来 replay：
+
+```python id="b3t2x7"
+graph.invoke(
+    None,
+    s.config
+)
+```
+
+不会有什么可执行的东西。
+
+所以：
+
+> **挑 checkpoint 时，先看 `next`。**
+
+想重跑 B/C：
+
+```text id="by8hqm"
+找：
+
+next == ("b",)
+```
+
+---
+
+# 十、这里再回头看 D3：其实你早就在用“时间旅行”
+
+D3 的：
+
+```python id="5cjcd3"
+Command(
+    resume="approve"
+)
+```
+
+当时我是：
+
+> **让 LangGraph 自动找到应该恢复的 checkpoint。**
+
+D4 做的只是：
+
+```text id="e1l8tz"
+把 checkpoint 历史列表打开
+↓
+自己选哪一档
+```
+
+所以可以这样理解：
+
+```text id="w81qqc"
+D3：
+自动读档
+
+D4：
+手动选档
+```
+
+这就是为什么 D4 看起来像新知识，但其实和 D3 是一条线。
+
+---
+
+# 十一、第六块：Replay
+
+真正关键的一行：
+
+```python id="7n5k8o"
+r_replay = graph.invoke(
+    None,
+    target.config,
+)
+```
+
+这里：
+
+```text id="3qg6ae"
+None
+```
+
+非常重要。
+
+它表示：
+
+> **不传新的输入。**
+
+而：
+
+```text id="iz2h0k"
+target.config
+```
+
+表示：
+
+> **从 target 这个 checkpoint 开始。**
+
+所以整句话就是：
+
+> **“把存档读到这里，从这里继续玩。”**
+
+官方文档的 Replay 示例也是 `graph.invoke(None, checkpoint.config)`；checkpoint 之前的节点不会重新执行，之后的节点重新执行。
+
+---
+
+# 十二、今天最重要的问题：怎么证明真的只重跑 B/C？
+
+这里不能只看：
+
+```text id="yq4cwp"
+→ B 执行
+→ C 执行
+```
+
+因为：
+
+> A 也可能偷偷跑过。
+
+所以我专门设计三个断言：
+
+```python id="e4u9j1"
+assert "→ B 执行 (默认方式)" in txt_replay
+
+assert "→ C 执行" in txt_replay
+
+assert "→ A 执行" not in txt_replay
+```
+
+前两个证明：
+
+> B/C 确实执行了。
+
+第三个最关键：
+
+> **A 没执行。**
+
+所以今天最值钱的结论其实是：
+
+> **“没有发生什么”，也是证据。**
+
+这和普通“跑通代码”的区别很大。
+
+---
+
+# 十三、消息数为什么还能作为第二层证据？
+
+如果目标 checkpoint：
+
+```text id="b4v3e1"
+messages = 2
+```
+
+里面是：
+
+```text id="3l4p8v"
+Human
+A
+```
+
+Replay 后：
+
+```text id="v5e6f5"
+Human
+A
+B
+C
+```
+
+所以：
+
+```text id="98ftv1"
+2 → 4
+```
+
+这可以作为第二层证据。
+
+也就是说：
+
+```text id="cok1d5"
+日志：
+没有 A，只有 B/C
+
+消息：
+2 → 4
+```
+
+两边都支持：
+
+> **这是真 Replay，不是从头跑。**
+
+---
+
+# 十四、第七块：Fork
+
+Replay 是：
+
+```text id="8by8vo"
+过去是什么
+↓
+原样重新走
+```
+
+Fork 是：
+
+```text id="dzc5bn"
+过去是什么
+↓
+我改一点
+↓
+看看另一条未来
+```
+
+代码：
+
+```python id="11kohr"
+new_cfg = graph.update_state(
+    target.config,
+    {
+        "way": "另一种方式"
+    },
+)
+```
+
+注意：
+
+> 这里的 `target.config` 是过去的存档钥匙。
+
+然后 `update_state()` 在这个历史点上改 state，并返回新的 config。
+
+官方文档明确说明，`update_state()` 不会覆盖原来的 checkpoint，而是创建新的分支；之后再用这个新 config `invoke(None, new_cfg)` 继续执行。
+
+---
+
+# 十五、Fork 为什么能改变未来？
+
+原来：
+
+```text id="c8j3n1"
+A
+ ↓
+B（默认方式）
+ ↓
+C
+```
+
+改完以后：
+
+```text id="9smp53"
+A
+ ↓
+B（另一种方式）
+ ↓
+C
+```
+
+因为 B 每次都会读：
+
+```python id="zylhjp"
+state["way"]
+```
+
+所以：
+
+> **改变过去的 state，未来节点就会看到新的值。**
+
+这就是 Fork 最核心的意思。
+
+不是：
+
+> “把历史改掉。”
+
+而是：
+
+> **“从这个历史点长出另一条未来。”**
+
+---
+
+# 十六、这里为什么一定使用 `new_cfg`？
+
+不要这样：
+
+```python id="z7kmee"
+graph.update_state(
+    target.config,
+    {"way": "另一种方式"}
+)
+
+graph.invoke(
+    None,
+    target.config,
+)
+```
+
+而要：
+
+```python id="ojgd9h"
+new_cfg = graph.update_state(
+    target.config,
+    {"way": "另一种方式"},
+)
+
+graph.invoke(
+    None,
+    new_cfg,
+)
+```
+
+因为：
+
+```text id="cmmh95"
+target.config
+→ 原来的过去
+
+new_cfg
+→ 新分支的钥匙
+```
+
+可以理解成：
+
+```text id="k6b4af"
+旧 checkpoint
+    │
+    ├── 原分支
+    │
+    └── new_cfg → 新分支
+```
+
+---
+
+# 十七、今天真正坑我的地方：断言也会写错
+
+这一次非常值得单独记录。
+
+原本写了：
+
+```python id="7zt3z4"
+assert (
+    "另一种方式"
+    in r_fork["messages"][-1].content
+)
+```
+
+结果红了。
+
+一开始我以为：
+
+> “难道 Fork 没生效？”
+
+但看日志：
+
+```text id="w3u2k8"
+→ B 执行 (另一种方式)
+→ C 执行
+```
+
+已经明确证明：
+
+> **Fork 生效了。**
+
+真正的问题是：
+
+```python id="m0zjwy"
+r_fork["messages"][-1]
+```
+
+最后一条是：
+
+```text id="c5n6h4"
+C
+```
+
+而不是：
+
+```text id="lq4k88"
+B
+```
+
+所以：
+
+> **断言检查错地方了。**
+
+这件事让我重新意识到：
+
+> **AssertionError 不等于业务代码有 bug。**
+
+首先要排查三件事：
+
+```text id="unb3oj"
+① 机制错了？
+
+② 断言写错了？
+
+③ 验证目标本身就错了？
+```
+
+这次属于：
+
+> **第三种。**
+
+---
+
+# 十八、而且我后来又连续猜错了
+
+第一轮：
+
+> `messages[-1]` 看错了。
+
+这个判断是对的。
+
+然后我又直接猜了一版字符串断言。
+
+结果又红。
+
+接着猜：
+
+> “是不是中文全角括号？”
+
+还是错。
+
+最后把字符串真正打印出来，再看字符：
+
+```python id="7xlc7a"
+repr(text)
+```
+
+发现真正的问题是：
+
+> **多了两个空格。**
+
+这次才真正找到原因。
+
+所以今天留下了一条非常值钱的纪律：
+
+> **不要猜字符串为什么不相等，把“真身”打印出来。**
+
+例如：
+
+```python id="3mwlzp"
+print(
+    repr(
+        r_fork["messages"][2].content
+    )
+)
+```
+
+必要时甚至可以：
+
+```python id="8gkt9s"
+print(
+    [
+        hex(ord(c))
+        for c in text
+    ]
+)
+```
+
+机器算出来的东西，比肉眼看：
+
+```text
+B完成(另一种方式)
+```
+
+可靠得多。
+
+---
+
+# 十九、所以断言最好断结构，不要硬编码整句话
+
+例如：
+
+```python id="9m5xqd"
+assert (
+    r_fork.get("way")
+    == "另一种方式"
+)
+```
+
+这种结构断言比较稳。
+
+如果还想证明：
+
+> B 真的使用了这个值。
+
+再加行为断言：
+
+```python id="g1n10r"
+assert (
+    "→ B 执行"
+    in txt_fork
+)
+
+assert (
+    "另一种方式"
+    in txt_fork
+)
+```
+
+于是：
+
+```text id="4yb7ua"
+结构证据：
+state 已经改了
+
+行为证据：
+B 真读到了修改后的值
+```
+
+两个一起才完整。
+
+---
+
+# 二十、最终的 8 项验证在证明什么？
+
+这次实验不是“写几个 assert 装样子”。
+
+每一个断言都对应一个机制。
+
+### Replay
+
+```text id="fy9m3f"
+B 出现
+```
+
+→ B 确实重跑。
+
+```text id="fchc8r"
+C 出现
+```
+
+→ C 确实重跑。
+
+```text id="xswj2c"
+A 不出现
+```
+
+→ A 没重跑。
+
+```text id="x46cb9"
+消息数只增加 2
+```
+
+→ 确实只是补上 B/C。
+
+### Fork
+
+```text id="o2qz4k"
+B 读到“另一种方式”
+```
+
+→ 修改真的影响未来。
+
+```text id="qef9uz"
+A 不出现
+```
+
+→ 没有从头跑。
+
+```text id="v6t8f8"
+原 checkpoint 还存在
+```
+
+→ 没有覆盖历史。
+
+```text id="2iybry"
+checkpoint 数量增加
+```
+
+→ 新分支真的产生了。
+
+所以：
+
+> **断言不是为了证明“程序没报错”，而是为了证明“机制就是我以为的机制”。**
+
+---
+
+# 二十一、Time Travel 的两个玩法
+
+现在终于可以把今天的两个 API 摆在一起。
+
+|      | Replay                     | Fork                                          |
+| ---- | -------------------------- | --------------------------------------------- |
+| 做什么  | 原样回放                       | 改状态后再走                                        |
+| API  | `invoke(None, old_config)` | `update_state()` → `invoke(None, new_config)` |
+| 前置节点 | 不重跑                        | 不重跑                                           |
+| 后续节点 | 重跑                         | 重跑                                            |
+| 原历史  | 保留                         | 保留                                            |
+| 用途   | 调试 / 复现                    | what-if / 替代方案                                |
+
+官方也是这么定义 Replay 与 Fork 的。
+
+类比 RPG：
+
+```text id="h2v4c8"
+Replay：
+读档重玩
+
+
+Fork：
+读档
++
+开修改器
++
+再玩一遍
+```
+
+---
+
+# 二十二、这就是 D4 和 D3 的连接
+
+现在回头看 D3。
+
+D3：
+
+```text id="y3q5x3"
+interrupt()
+ ↓
+checkpoint
+ ↓
+Command(resume)
+ ↓
+继续
+```
+
+D4：
+
+```text id="q6k5bq"
+get_state_history()
+ ↓
+看到所有 checkpoint
+ ↓
+自己挑一个
+ ↓
+invoke(None, target.config)
+```
+
+所以：
+
+> **D3 是自动选档。**
+>
+> **D4 是手动选档。**
+
+这也是为什么我现在觉得 Time Travel 没有那么神秘。
+
+它只是把：
+
+```text id="p2f842"
+“框架替我找哪份存档”
+```
+
+变成：
+
+```text id="ntf9j0"
+“我自己决定回到哪份存档”
+```
+
+---
+
+# 二十三、最后一个边界：回档不是撤销现实世界
+
+这个必须单独记。
+
+如果一个工具已经：
+
+```text id="e9y1ci"
+真的删除文件
+```
+
+然后我回到删除之前的 checkpoint。
+
+这不代表：
+
+```text id="xq4w21"
+文件自动恢复。
+```
+
+Time Travel 管的是：
+
+> **Agent 的状态和决策历史。**
+
+不是：
+
+> **现实世界的副作用。**
+
+所以：
+
+```text id="5x8t4b"
+回档
+≠
+撤销真实操作
+```
+
+这也是为什么生产系统里，Time Travel 和：
+
+```text
+idempotency
+side effect
+compensation
+```
+
+必须分开考虑。
+
+---
+
+# 二十四、今天真正要记的其实只有这一张图
+
+```text id="x7s2n4"
+             D3
+              │
+       interrupt + resume
+              │
+              ▼
+        自动找到 checkpoint
+              │
+              ▼
+             继续
+
+
+             D4
+              │
+      get_state_history()
+              │
+              ▼
+        打开历史存档列表
+              │
+              ▼
+             挑档
+          /        \
+         /          \
+    Replay          Fork
+      │                │
+      │         update_state()
+      │                │
+      │                ▼
+      │             新分支
+      │                │
+      └──────┬─────────┘
+             ▼
+          invoke(None)
+             │
+             ▼
+          重跑后半段
+```
+
+再压缩成一句：
+
+> **D3 是自动读档，D4 是手动读档。**
+
+---
+
+# 二十五、今天的收尾复习卡
+
+### 我只需要记住 5 个东西
+
+```text id="0f8r3m"
+thread_id
+→ 哪条历史
+
+
+checkpoint_id
+→ 哪一帧
+
+
+snapshot.next
+→ 下一步该谁
+
+
+Replay
+→ 原样读档
+
+
+Fork
+→ 改档后长出另一条未来
+```
+
+再记一个验证原则：
+
+> **“B/C 出现”证明它们跑了；“A 没出现”才证明它没有从头跑。**
+
+最后再记今天最真实的一课：
+
+> **断言失败以后，不要立刻改断言。**
+>
+> 先问：
+>
+> ```text
+> 机制错了吗？
+> 断言错了吗？
+> 验证目标错了吗？
+> ```
+>
+> 这次真正让我翻车的，不是 LangGraph，而是我自己写了一个**未经验证的断言**。
+
+---
+
+# 二十六、完整源码
+
+下面这份就是今天的最终学习版。
+
+我把你原来的实验保留了下来，只修正了那个会因为检查 `messages[-1]` 而误报的断言，并把失败信息尽量写得更容易排查。
+
+```python id="v9a8s2"
+"""
+W6-D4 实验：Time Travel
+=======================
+
+目标：
+
+1. 完整运行 A → B → C
+2. 查看历史 checkpoint
+3. 找到 next == ("b",) 的 checkpoint
+4. Replay：
+   - B 重跑
+   - C 重跑
+   - A 不重跑
+5. Fork：
+   - 修改 way
+   - B 使用新的 way
+   - A 不重跑
+6. 验证：
+   - 原 checkpoint 仍然存在
+   - checkpoint 总数增加
+
+注意：
+
+这个实验故意不用 LLM。
+
+因为今天真正要验证的是：
+“到底哪些节点被重新执行”。
+
+确定性越高，证据越干净。
+"""
+
+import io
+import contextlib
+
+from typing import Annotated, TypedDict
+
+from langgraph.graph import (
+    StateGraph,
+    START,
+    END,
+)
+
+from langgraph.graph.message import (
+    add_messages,
+)
+
+from langgraph.checkpoint.memory import (
+    MemorySaver,
+)
 
 
 # ============================================================
-# 2. State
+# 1. State
 # ============================================================
 
-class S(TypedDict):
+class T(TypedDict):
 
-    # 主消息历史
-    #
-    # add_messages：
-    # 新消息追加；
-    # 如果 message id 相同，
-    # 可以更新原来的消息。
+    # 消息历史
     messages: Annotated[
         list,
         add_messages,
     ]
 
-    # 人工审批留下的操作记录
-    audit_note: str
+    # 普通字段。
+    #
+    # 专门用于：
+    # “修改历史 state 后，
+    #  未来节点是不是会看到新值？”
+    way: str
 
 
 # ============================================================
-# 3. LLM
+# 2. A 节点
 # ============================================================
 
-_common = {
-    "model": os.getenv(
-        "DEEPSEEK_MODEL",
-        "deepseek-v4-flash",
-    ),
+def step_a(state: T) -> dict:
 
-    "api_key": os.getenv(
-        "DEEPSEEK_API_KEY",
-    ),
-
-    "base_url": os.getenv(
-        "DEEPSEEK_BASE_URL",
-        "https://api.deepseek.com",
-    ),
-
-    "temperature": 0,
-}
-
-
-# ------------------------------------------------------------
-# 决策模型
-# ------------------------------------------------------------
-#
-# 有工具。
-#
-# 它可以：
-#
-#     tool_calls
-#
-# 所以它负责：
-#
-#     “我想做什么？”
-#
-
-llm_decide = ChatOpenAI(
-    **_common
-).bind_tools(
-    [delete_file]
-)
-
-
-# ------------------------------------------------------------
-# 收口模型
-# ------------------------------------------------------------
-#
-# 没有绑定工具。
-#
-# 它只能总结，
-# 不能再产生 delete_file。
-#
-
-llm_summarize = ChatOpenAI(
-    **_common
-)
-
-
-# ============================================================
-# 4. decide
-# ============================================================
-
-def decide(state: S) -> dict:
-    """
-    决策节点。
-
-    关键原则：
-
-    先让 AIMessage return，
-    再进入 approve。
-
-    不要在这里 interrupt。
-    """
-
-    ai_msg = llm_decide.invoke(
-        state["messages"]
-    )
-
+    # 这句 print 是实验判据。
+    #
+    # Replay 时：
+    #
+    # 如果这里再次出现，
+    # 就说明 A 被重新执行了。
     print(
-        "[decide] tool_calls =",
-        len(ai_msg.tool_calls),
+        "→ A 执行"
     )
 
     return {
         "messages": [
-            ai_msg
+            (
+                "ai",
+                "A 完成",
+            )
         ]
     }
 
 
 # ============================================================
-# 5. approve
+# 3. B 节点
 # ============================================================
 
-def approve(state: S) -> dict:
-    """
-    审批节点。
+def step_b(state: T) -> dict:
 
-    做三件事：
-
-    1. 从 state 读取模型的 tool_call
-    2. interrupt() 问人
-    3. reject 就结束；
-       approve/edit 就放行
-    """
-
-    # --------------------------------------------------------
-    # 读取最后一条消息
-    # --------------------------------------------------------
-
-    last = (
-        state["messages"][-1]
+    # 默认情况下：
+    #
+    # way = ""
+    #
+    # 所以显示“默认方式”。
+    #
+    # Fork 后：
+    #
+    # update_state()
+    # 把 way 改成“另一种方式”
+    #
+    # 那么 B 就会看到新值。
+    way = (
+        state.get("way")
+        or "默认方式"
     )
-
-    # 理论上这里一定应该是：
-    #
-    # AIMessage(tool_calls=[...])
-    #
-
-    if not (
-        isinstance(
-            last,
-            AIMessage,
-        )
-        and last.tool_calls
-    ):
-        return {}
-
-    # --------------------------------------------------------
-    # 取第一条 tool_call
-    # --------------------------------------------------------
-
-    tc = last.tool_calls[0]
 
     print(
-        "[approve] 待审批参数：",
-        tc["args"],
-    )
-
-    # --------------------------------------------------------
-    # interrupt
-    # --------------------------------------------------------
-    #
-    # 第一次：
-    #
-    #     interrupt()
-    #     ↓
-    #     图停住
-    #
-    # resume：
-    #
-    #     节点重新执行
-    #     ↓
-    #     再次来到 interrupt()
-    #     ↓
-    #     返回 resume 值
-    #
-
-    answer = interrupt(
-        {
-            "question": (
-                f"模型想删除 "
-                f"{tc['args']['path']}，"
-                f"批准吗？"
-            ),
-
-            "options": [
-                "approve",
-                "reject",
-                "edit",
-            ],
-        }
-    )
-
-    # --------------------------------------------------------
-    # reject
-    # --------------------------------------------------------
-    #
-    # 返回一条没有 tool_calls 的消息。
-    #
-    # route_after_approve()
-    # 就会判断：
-    #
-    # 没 tool_calls
-    # → END
-    #
-
-    if answer == "reject":
-
-        return {
-            "messages": [
-                AIMessage(
-                    content=(
-                        "已取消删除，"
-                        "本次未执行任何操作。"
-                    )
-                )
-            ]
-        }
-
-    # --------------------------------------------------------
-    # approve / edit
-    # --------------------------------------------------------
-    #
-    # 两者都走这里。
-    #
-    # 因为：
-    #
-    # approve：
-    #     原参数直接执行
-    #
-    # edit：
-    #     参数已经在图外 update_state()
-    #     修改完成
-    #
-    # 所以这里都只需要：
-    #
-    #     放行
-    #
-
-    return {}
-
-
-# ============================================================
-# 6. audit
-# ============================================================
-
-def audit(state: S) -> dict:
-    """
-    审计节点。
-
-    解决：
-
-    “为什么模型准备的参数
-     和最后真正执行的参数不一样？”
-
-    因为可能有人在图外修改了 state。
-    """
-
-    note = state.get(
-        "audit_note",
-        "",
-    )
-
-    # 没有人工修改记录
-    if not note:
-        return {}
-
-    print(
-        "[audit]",
-        note,
-    )
-
-    # --------------------------------------------------------
-    # 把人工动作重新放进 transcript
-    # --------------------------------------------------------
-
-    audit_message = HumanMessage(
-        content=(
-            f"【审批人操作记录】{note}。"
-            "这是审批人主动、有意做出的决定，"
-            "已获批准执行；"
-            "这不是错误，无需重试，"
-            "请直接据实总结结果。"
-        )
+        f"→ B 执行 ({way})"
     )
 
     return {
         "messages": [
-            audit_message
-        ],
-
-        # 用完清空
-        "audit_note": "",
-    }
-
-
-# ============================================================
-# 7. summarize
-# ============================================================
-
-def summarize(state: S) -> dict:
-    """
-    最终收口。
-
-    注意：
-
-    llm_summarize 没有绑定工具。
-
-    所以从结构上保证：
-    这里不能再次产生 tool_calls。
-    """
-
-    ai_msg = llm_summarize.invoke(
-        state["messages"]
-    )
-
-    print(
-        "[summarize] tool_calls = 0"
-    )
-
-    return {
-        "messages": [
-            ai_msg
+            (
+                "ai",
+                f"B 完成 ({way})",
+            )
         ]
     }
 
 
 # ============================================================
-# 8. decide 后路由
+# 4. C 节点
 # ============================================================
 
-def route_after_decide(
-    state: S,
-):
+def step_c(state: T) -> dict:
 
-    last = (
-        state["messages"][-1]
+    print(
+        "→ C 执行"
     )
 
-    # 有工具调用
-    if (
-        isinstance(
-            last,
-            AIMessage,
-        )
-        and last.tool_calls
-    ):
-        return "approve"
-
-    # 普通回答
-    return END
+    return {
+        "messages": [
+            (
+                "ai",
+                "C 完成",
+            )
+        ]
+    }
 
 
 # ============================================================
-# 9. approve 后路由
+# 5. 构建图
 # ============================================================
 
-def route_after_approve(
-    state: S,
-):
-
-    last = (
-        state["messages"][-1]
-    )
-
-    # approve / edit：
-    #
-    # 仍然是带 tool_calls 的 AIMessage
-    #
-    # → tools
-    #
-
-    if (
-        isinstance(
-            last,
-            AIMessage,
-        )
-        and last.tool_calls
-    ):
-        return "tools"
-
-    # reject：
-    #
-    # 没有 tool_calls
-    #
-    # → END
-    #
-
-    return END
-
-
-# ============================================================
-# 10. 构建图
-# ============================================================
-
-builder = StateGraph(S)
-
-
-# ------------------------------------------------------------
-# 节点
-# ------------------------------------------------------------
+builder = StateGraph(T)
 
 builder.add_node(
-    "decide",
-    decide,
+    "a",
+    step_a,
 )
 
 builder.add_node(
-    "approve",
-    approve,
+    "b",
+    step_b,
 )
 
 builder.add_node(
-    "tools",
-    ToolNode(
-        [delete_file]
-    ),
-)
-
-builder.add_node(
-    "audit",
-    audit,
-)
-
-builder.add_node(
-    "summarize",
-    summarize,
+    "c",
+    step_c,
 )
 
 
 # ------------------------------------------------------------
-# START → decide
+# 图结构：
+#
+# START → A → B → C → END
 # ------------------------------------------------------------
 
 builder.add_edge(
     START,
-    "decide",
+    "a",
 )
-
-
-# ------------------------------------------------------------
-# decide → approve / END
-# ------------------------------------------------------------
-
-builder.add_conditional_edges(
-    "decide",
-    route_after_decide,
-    {
-        "approve": "approve",
-        END: END,
-    },
-)
-
-
-# ------------------------------------------------------------
-# approve → tools / END
-# ------------------------------------------------------------
-
-builder.add_conditional_edges(
-    "approve",
-    route_after_approve,
-    {
-        "tools": "tools",
-        END: END,
-    },
-)
-
-
-# ------------------------------------------------------------
-# tools → audit
-# ------------------------------------------------------------
 
 builder.add_edge(
-    "tools",
-    "audit",
+    "a",
+    "b",
 )
 
-
-# ------------------------------------------------------------
-# audit → summarize
-# ------------------------------------------------------------
-
 builder.add_edge(
-    "audit",
-    "summarize",
+    "b",
+    "c",
 )
 
-
-# ------------------------------------------------------------
-# summarize → END
-# ------------------------------------------------------------
-
 builder.add_edge(
-    "summarize",
+    "c",
     END,
 )
 
 
 # ============================================================
-# 11. 编译
+# 6. 编译
 # ============================================================
 #
-# checkpointer 非常重要。
+# checkpointer 是 Time Travel 的基础。
 #
-# interrupt 能停下来，
-# 就必须有人帮我们保存：
-#
-#     state
-#     当前进度
-#
-# MemorySaver 适合学习。
+# 没有 checkpoint：
+# 就没有历史可以选。
 #
 
 graph = builder.compile(
@@ -2018,322 +1705,733 @@ graph = builder.compile(
 
 
 # ============================================================
-# 12. thread_id
+# 7. thread_id
 # ============================================================
 #
 # thread_id：
-#
-#     哪一条历史 / 哪个会话
+# “我是哪条历史？”
 #
 
 cfg = {
     "configurable": {
-        "thread_id": "w6-d4-hitl",
+        "thread_id": "tt-1"
     }
 }
 
 
 # ============================================================
-# 13. 第一次调用
+# 8. 第一次完整运行
 # ============================================================
 #
-# 运行：
+# 先把 A/B/C 全部跑一遍，
+# 制造出后面可以回去看的历史。
 #
-# START
-#   ↓
-# decide
-#   ↓
-# approve
-#   ↓
-# interrupt
-#
-# 然后暂停。
-#
-
-print("\n" + "=" * 60)
-print("第一次运行")
-print("=" * 60)
-
-graph.invoke(
-    {
-        "messages": [
-            (
-                "user",
-                "帮我删除 /tmp/a.txt",
-            )
-        ],
-
-        "audit_note": "",
-    },
-    cfg,
-)
-
-
-# ============================================================
-# 14. 查看暂停时 state
-# ============================================================
-
-st = graph.get_state(
-    cfg
-)
-
-# ------------------------------------------------------------
-# next
-#
-# 现在应该还有下一步。
-# 因为图停在 approve。
-# ------------------------------------------------------------
 
 print(
-    "\n当前 next =",
-    st.next,
+    "\n" + "=" * 60
+)
+
+print(
+    "第一次运行："
+    "完整执行 A → B → C"
+)
+
+print(
+    "=" * 60
 )
 
 
-# ------------------------------------------------------------
-# values
-#
-# 查看 state 内容。
-# ------------------------------------------------------------
+log = io.StringIO()
+
+with contextlib.redirect_stdout(
+    log
+):
+
+    r0 = graph.invoke(
+        {
+            "messages": [
+                (
+                    "user",
+                    "完整跑一遍 A B C",
+                )
+            ],
+
+            # 初始化 way
+            "way": "",
+        },
+        cfg,
+    )
+
 
 print(
-    "当前消息数 =",
+    "原始跑完：",
+    log.getvalue()
+        .replace("\n", " | ")
+        .strip(),
+)
+
+
+# 预期：
+#
+# Human
+# A
+# B
+# C
+#
+# = 4 条消息
+
+print(
+    "原始消息数：",
     len(
-        st.values[
+        r0["messages"]
+    ),
+)
+
+
+# ============================================================
+# 9. 查看全部 checkpoint
+# ============================================================
+#
+# get_state_history()
+# 返回这一条 thread 的历史。
+#
+# 当前 LangGraph 是：
+# 新 → 旧
+#
+
+print(
+    "\n" + "=" * 60
+)
+
+print(
+    "历史 checkpoint："
+    "新 → 旧"
+)
+
+print(
+    "=" * 60
+)
+
+
+snaps = list(
+    graph.get_state_history(
+        cfg
+    )
+)
+
+
+print(
+    "checkpoint 数量：",
+    len(snaps),
+)
+
+
+for i, s in enumerate(
+    snaps
+):
+
+    # ------------------------------------------
+    # config
+    #
+    # 里面有：
+    #
+    # thread_id
+    # checkpoint_id
+    # ------------------------------------------
+
+    cid = (
+        s.config[
+            "configurable"
+        ][
+            "checkpoint_id"
+        ]
+    )
+
+    # ------------------------------------------
+    # next
+    #
+    # 下一步该执行谁
+    # ------------------------------------------
+
+    next_nodes = s.next
+
+    # ------------------------------------------
+    # values
+    #
+    # 当前 state 内容
+    # ------------------------------------------
+
+    message_count = len(
+        s.values[
+            "messages"
+        ]
+    )
+
+    print(
+        f"#{i} "
+        f"cid={cid[:8]} "
+        f"next={next_nodes} "
+        f"消息数={message_count}"
+    )
+
+
+# ============================================================
+# 10. 找目标 checkpoint
+# ============================================================
+#
+# 我想：
+#
+#     A 不重跑
+#     B/C 重跑
+#
+# 所以我要找：
+#
+#     next == ("b",)
+#
+# 这意味着：
+#
+#     A 已完成
+#     B 还没执行
+#
+
+target = next(
+    s
+    for s in snaps
+    if s.next == ("b",)
+)
+
+
+target_checkpoint_id = (
+    target.config[
+        "configurable"
+    ][
+        "checkpoint_id"
+    ]
+)
+
+
+print(
+    "\n目标 checkpoint：",
+    target_checkpoint_id[:8],
+)
+
+print(
+    "目标 next：",
+    target.next,
+)
+
+print(
+    "目标消息数：",
+    len(
+        target.values[
             "messages"
         ]
     ),
 )
 
 
-# ------------------------------------------------------------
-# 最后一条应该是：
+# ============================================================
+# 11. Replay
+# ============================================================
 #
-# AIMessage(tool_calls=[...])
-# ------------------------------------------------------------
+# 关键：
+#
+#     invoke(None, target.config)
+#
+# None：
+#     不提供新输入
+#
+# target.config：
+#     从这一个 checkpoint 开始
+#
 
-last = (
-    st.values[
-        "messages"
-    ][-1]
+print(
+    "\n" + "=" * 60
 )
 
 print(
-    "当前 tool_calls =",
-    last.tool_calls,
+    "Replay："
+    "从 B 前面的 checkpoint 继续"
+)
+
+print(
+    "=" * 60
+)
+
+
+log2 = io.StringIO()
+
+with contextlib.redirect_stdout(
+    log2
+):
+
+    r_replay = graph.invoke(
+        None,
+
+        target.config,
+    )
+
+
+txt_replay = (
+    log2.getvalue()
+)
+
+
+print(
+    "回放日志：",
+    txt_replay
+        .replace("\n", " | ")
+        .strip(),
+)
+
+
+print(
+    "回放后消息数：",
+    len(
+        r_replay[
+            "messages"
+        ]
+    ),
 )
 
 
 # ============================================================
-# 15. 修改 tool_calls
-# ============================================================
-
-new_tool_calls = [
-    {
-        # 保留原来的 tool_call 字段
-        **tc,
-
-        # 只修改 args 中的 path
-        "args": {
-            **tc["args"],
-
-            "path":
-                "/tmp/old.txt",
-        },
-    }
-
-    for tc in last.tool_calls
-]
-
-
-# ============================================================
-# 16. 构造新的 AIMessage
+# 12. Replay 断言
 # ============================================================
 #
-# ★ 最重要的是：
+# 这部分是今天最重要的。
 #
-#     id=last.id
+# 不是：
+#     “看起来像 replay”
 #
-# 表示：
-#
-#     “我要更新刚才那条消息。”
-#
-# 而不是新增一条消息。
+# 而是：
+#     “用断言证明 replay”
 #
 
-fixed = AIMessage(
-    id=last.id,
+print(
+    "\n" + "=" * 60
+)
 
-    content=last.content,
+print(
+    "Replay 断言"
+)
 
-    tool_calls=new_tool_calls,
+print(
+    "=" * 60
+)
+
+
+# B 必须重跑
+assert (
+    "→ B 执行 (默认方式)"
+    in txt_replay
+), (
+    "B 没有重跑"
+)
+
+
+# C 必须重跑
+assert (
+    "→ C 执行"
+    in txt_replay
+), (
+    "C 没有重跑"
+)
+
+
+# ------------------------------------------------------------
+# ★ 最关键
+#
+# A 不能重跑。
+#
+# 如果出现：
+#
+#     → A 执行
+#
+# 就说明这不是我们想验证的 replay。
+# ------------------------------------------------------------
+
+assert (
+    "→ A 执行"
+    not in txt_replay
+), (
+    "A 竟然重跑了："
+    "这说明没有从目标 checkpoint replay"
+)
+
+
+# ------------------------------------------------------------
+# 消息数：
+#
+# 原来：
+#
+#     2
+#
+# Replay B/C：
+#
+#     +2
+#
+# 最终：
+#
+#     4
+# ------------------------------------------------------------
+
+expected_count = (
+    len(
+        target.values[
+            "messages"
+        ]
+    )
+    + 2
+)
+
+assert (
+    len(
+        r_replay[
+            "messages"
+        ]
+    )
+    == expected_count
+), (
+    "Replay 消息数量不符合预期："
+    f"expected={expected_count}, "
+    f"actual={len(r_replay['messages'])}"
+)
+
+
+print(
+    "✅ Replay 断言通过"
 )
 
 
 # ============================================================
-# 17. update_state
+# 13. Fork
 # ============================================================
 #
-# 这里一次做两件事：
+# 从同一个历史 checkpoint：
 #
-#     ① 改 tool_calls
-#     ② 写 audit_note
+#     修改 way
 #
-# 也就是：
+# 原来：
+#     默认方式
 #
-#     改档 + 记录原因
+# 新分支：
+#     另一种方式
 #
 
-graph.update_state(
-    cfg,
+print(
+    "\n" + "=" * 60
+)
+
+print(
+    "Fork："
+    "修改过去，再发展新的未来"
+)
+
+print(
+    "=" * 60
+)
+
+
+new_cfg = graph.update_state(
+    target.config,
     {
-        "messages": [
-            fixed
-        ],
-
-        "audit_note": (
-            "审批人把删除目标从 "
-            "/tmp/a.txt 改成了 "
-            "/tmp/old.txt"
-        ),
+        "way": "另一种方式"
     },
 )
 
 
+new_checkpoint_id = (
+    new_cfg[
+        "configurable"
+    ][
+        "checkpoint_id"
+    ]
+)
+
+
+print(
+    "原 checkpoint：",
+    target_checkpoint_id[:8],
+)
+
+print(
+    "新 checkpoint：",
+    new_checkpoint_id[:8],
+)
+
+
 # ============================================================
-# 18. resume
+# 14. 从 fork 后的新 config 继续
+# ============================================================
+
+log3 = io.StringIO()
+
+with contextlib.redirect_stdout(
+    log3
+):
+
+    r_fork = graph.invoke(
+        None,
+        new_cfg,
+    )
+
+
+txt_fork = (
+    log3.getvalue()
+)
+
+
+print(
+    "分叉日志：",
+    txt_fork
+        .replace("\n", " | ")
+        .strip(),
+)
+
+
+# ============================================================
+# 15. Fork 断言
+# ============================================================
+
+print(
+    "\n" + "=" * 60
+)
+
+print(
+    "Fork 断言"
+)
+
+print(
+    "=" * 60
+)
+
+
+# ------------------------------------------------------------
+# B 必须看到修改后的 way
+# ------------------------------------------------------------
+
+assert (
+    "→ B 执行 (另一种方式)"
+    in txt_fork
+), (
+    "B 没有读取到 fork 后的新值"
+)
+
+
+# ------------------------------------------------------------
+# A 不应该重新执行
+# ------------------------------------------------------------
+
+assert (
+    "→ A 执行"
+    not in txt_fork
+), (
+    "A 不应该因为 fork 又重跑"
+)
+
+
+# ------------------------------------------------------------
+# 不要写：
+#
+#     r_fork["messages"][-1]
+#
+# 因为最后一条消息是 C。
+#
+# 我要验证的是：
+#     B 那一条消息
+# ------------------------------------------------------------
+
+fork_text = " | ".join(
+    str(
+        message.content
+    )
+    for message
+    in r_fork["messages"]
+)
+
+
+assert (
+    "B 完成 (另一种方式)"
+    in fork_text
+), (
+    "Fork 结果中没有找到 "
+    "B 使用新 way 的证据："
+    f"{fork_text!r}"
+)
+
+
+print(
+    "✅ Fork 断言通过"
+)
+
+
+# ============================================================
+# 16. 验证原历史仍然存在
 # ============================================================
 #
-# 这里不是重新发一条用户消息。
+# Fork：
+#
+#     不是覆盖原历史
 #
 # 而是：
 #
-#     恢复之前 interrupt()
-#     并让 answer 得到：
+#     从过去长出新分支
 #
-#         "edit"
-#
-# ------------------------------------------------------------
 
-print("\n" + "=" * 60)
-print("恢复执行")
-print("=" * 60)
+snaps_after = list(
+    graph.get_state_history(
+        cfg
+    )
+)
 
-result = graph.invoke(
-    Command(
-        resume="edit"
-    ),
-    cfg,
+
+checkpoint_ids_after = [
+    s.config[
+        "configurable"
+    ][
+        "checkpoint_id"
+    ]
+
+    for s in snaps_after
+]
+
+
+# 原 checkpoint 必须还存在
+assert (
+    target_checkpoint_id
+    in checkpoint_ids_after
+), (
+    "原 checkpoint 消失了"
+)
+
+
+# Fork 后应该出现更多 checkpoint
+assert (
+    len(snaps_after)
+    >
+    len(snaps)
+), (
+    "Fork 没有产生新的 checkpoint"
 )
 
 
 # ============================================================
-# 19. 查看最终结果
+# 17. 最终结果
 # ============================================================
 
 print(
-    "\n最终结果：",
-    result[
-        "messages"
-    ][-1].content,
+    "\n" + "=" * 60
 )
-
-
-# ============================================================
-# 20. 最终验收
-# ============================================================
-
-final_state = graph.get_state(
-    cfg
-)
-
-# ------------------------------------------------------------
-# next == ()
-#
-# 说明：
-#     图已经结束。
-# ------------------------------------------------------------
 
 print(
-    "\n最终 next =",
-    final_state.next,
+    "✅ Time Travel 实验全部通过"
 )
 
-
-# ------------------------------------------------------------
-# 最后一条消息：
-#
-# 应该是普通 AIMessage，
-# 不应该再有 tool_calls。
-# ------------------------------------------------------------
+print(
+    "Replay："
+    "B/C 重跑，A 没重跑"
+)
 
 print(
-    "最后一条 tool_calls =",
-    getattr(
-        final_state.values[
-            "messages"
-        ][-1],
-        "tool_calls",
-        None,
-    ),
+    "Fork："
+    "B 使用新 way，原历史仍然存在"
+)
+
+print(
+    "=" * 60
 )
 ```
 
 ---
 
-# 二十九、最后只留这一张图
+# 二十六、最后收成一张卡
 
-```text
-                    用户
-                      │
-                      ▼
-                  ┌────────┐
-                  │ decide │
-                  │ 有工具  │
-                  └────┬───┘
-                       │
-                 tool_calls
-                       │
-                       ▼
-                  ┌────────┐
-                  │ approve│
-                  │  问人   │
-                  └────┬───┘
-                       │
-             ┌─────────┼─────────┐
-             │         │         │
-          approve    reject     edit
-             │         │         │
-             │         ▼         │
-             │        END        │
-             │                   │
-             │             update_state
-             │                   │
-             └──────────┬────────┘
-                        ▼
-                     tools
-                        │
-                        ▼
-                      audit
-                        │
-                        ▼
-                   summarize
-                   （无工具）
-                        │
-                        ▼
-                       END
+```text id="c6t6e0"
+W6-D4
+────────────────────────
+
+D3：
+自动恢复 checkpoint
+
+D4：
+手动挑 checkpoint
+
+
+get_state_history()
+        ↓
+    存档列表
+
+snap.next
+        ↓
+    下一步是谁
+
+snap.config
+        ↓
+    这份存档的钥匙
+
+invoke(None, snap.config)
+        ↓
+      Replay
+
+update_state(...)
+        ↓
+       Fork
+
+Replay：
+原样重跑未来
+
+Fork：
+改档后重跑未来
+
+
+最重要的验证：
+
+B 出现 ✅
+C 出现 ✅
+A 不出现 ✅
 ```
 
-然后记住四句话：
+还有今天额外学到的一条：
 
-> **先 `decide`，再 `interrupt`。**
+> **断言失败，不要马上改断言。**
+>
+> 先问：
+>
+> **机制错了？断言错了？还是验证目标错了？**
 
-> **人改的是 pending `tool_calls`。**
+这一天真正收尾的地方，不是：
 
-> **`audit` 告诉模型为什么改，`summarize` 从结构上阻止重试。**
+```text
+✅ 8 个断言全绿
+```
 
-> **`thread_id` 是身份，`checkpoint_id` 是时间；`resume` 是图内传值，`update_state` 是图外改档。**
+而是：
 
-这篇对我来说真正难的地方，不是把 API 全记住。
+> **我开始知道，连“验证代码”本身也需要被验证。**
 
-而是终于把这些 API 放回了正确的位置。
+D3 学的是：
+
+> **让图停下来问人。**
+
+D4 学的是：
+
+> **既然图会存档，那我就可以自己挑过去，重新走未来。**
+
+到这里，W6 前四天其实已经连成一条线：
+
+```text id="v2e7hz"
+存档
+ ↓
+停下来
+ ↓
+人干预
+ ↓
+改状态
+ ↓
+回到过去
+ ↓
+重新走未来
+```
+
+这就是这一天的新知识，也是 HITL 这一章的真正收尾。
