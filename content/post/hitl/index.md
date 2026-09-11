@@ -11,437 +11,1319 @@ tags:
 image: ""
 ---
 
-# W6-D3 · 让图停下来问人：HITL 的 interrupt 与 Command
+# 让图停下来问人
 
-## 零、为什么需要"停下来"
-
-D1/D2 你给图装上了存档系统：它能跨 invoke 记事、能按 thread_id 分会话、能把存档落到磁盘。但有个场景存档解决不了：
-
-```fallback
-用户："帮我把 /data 下的旧文件删了"
-无 HITL: agent 决定删 → 直接执行 → 😱 删错了没人负责
-有 HITL: agent 决定删 → 【暂停问人】→ 人批准/拒绝 → 才继续 ✅
-```
-
-**Agent 越自主，就越需要有人能在关键时刻按下暂停键。** 这就是 HITL（Human-In-The-Loop）：让图"停下来问人 → 拿到人的决定 → 从停的地方继续"。
-
-**HITL 的硬前提是 checkpointer**——这不是巧合，而是逻辑必然：
-
-```fallback
-interrupt() 一停 → 整个 state 和"停在哪"必须落盘（checkpoint）
-                 → 人审批完 → Command(resume=...) 读同一个存档 → 从暂停处继续
-```
-
-没有 checkpointer，图停不下来（不知道停在哪），也续不上（resume 只能从头跑）。**所以 D1/D2 不是"HITL 的前置作业"，它就是 HITL 的一半。**
-
-> 类比：D1/D2 你学会的是"录影带能存能放"；今天学的是**在录影带里插一个"待定帧"**——暂停时把画面存下来，人看完说"过"，再从这一帧接着放。
-
----
-
-## 一、两种停法：哨卡 vs 对话窗口
-
-LangGraph 有两种中断方式，先看清它们的形状再动手：
-
-| | `interrupt_before` / `interrupt_after` | `interrupt()`（函数） |
-|---|---|---|
-| 位置 | **compile() 时配置**，在节点**边界**停 | 节点**内部**调用，可停在中间 |
-| 灵活度 | 固定停（每次执行到这就停） | 条件停（只在你想停的时候停） |
-| 能不能提问 | 停后只能看 state | 可以 `interrupt({问题})` 把问题抛出去 |
-| 用户怎么回 | 只能"放行"继续 | `Command(resume=值)` 把值**传回节点内** |
-| 停在哪 | `state.next` 指向**下一个**节点 | `state.next` 指向**当前**节点 |
-| 一句话 | **哨卡**（固定位置拦人） | **对话**（边问边收答案） |
-
-> 类比：哨卡像地铁安检——不管你是谁，走到这都得停，检完放行就完事；对话窗口像柜台办事——工作人员抬头问你一句"确定要办吗？"，你回答"办"或"不办"，甚至可以说"换个方式办"，他拿到你的回答才继续。
-
-**现代 LangGraph 推荐优先用 `interrupt()`**——它能提问、能收任意答案、还能按条件决定停不停。但哨卡写法更直白，适合"这个节点每次都必须审批"的场景。两种都要会，因为它们的返回值语义不一样。
-
----
-
-## 二、方式一：`interrupt_before` —— 编译期哨卡
-
-### 2.1 代码
-
-```python
-"""W6-D3 方式一：interrupt_before —— 在 tools 节点前设哨卡"""
-import os
-from dotenv import load_dotenv
-load_dotenv(override=True)   # 需要指定项目根时用 Path(__file__).parent.parent / ".env"
-
-from typing import Annotated, TypedDict
-from langgraph.graph import StateGraph, START, END
-from langgraph.graph.message import add_messages
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import ToolNode, tools_condition
-from langchain_core.tools import tool
-from langchain_openai import ChatOpenAI
-
-# ── 危险工具（示例版，不真删；print 是"执行标记"，验收要用）──
-@tool
-def delete_file(path: str) -> str:
-    """【危险】删除本地文件"""
-    print(f"【工具真的被执行了】路径: {path}")
-    return f"文件已删除: {path}"
-
-class S(TypedDict):
-    messages: Annotated[list, add_messages]
-
-llm = ChatOpenAI(
-    model="deepseek-v4-flash",
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com",
-    temperature=0,
-).bind_tools([delete_file])
-
-def agent_node(state: S) -> dict:
-    return {"messages": [llm.invoke(state["messages"])]}
-
-b1 = StateGraph(S)
-b1.add_node("agent", agent_node)
-b1.add_node("tools", ToolNode([delete_file]))
-b1.add_edge(START, "agent")
-b1.add_conditional_edges("agent", tools_condition)   # 有 tool_calls → tools
-b1.add_edge("tools", "agent")                        # 回边
-
-# ⭐ 唯一的差异：编译时声明"进 tools 之前必须停"
-g1 = b1.compile(checkpointer=MemorySaver(), interrupt_before=["tools"])
-
-cfg1 = {"configurable": {"thread_id": "hitl-1"}}
-
-# ① 跑到哨卡处自动停住
-g1.invoke({"messages": [("user", "帮我删掉 /tmp/a.txt")]}, cfg1)
-
-# ② 看暂停现场（注意：进度信息在 get_state 的快照上，不在 invoke 返回值上）
-st = g1.get_state(cfg1)
-print("① 暂停！下一步将执行:", st.next)                    # ('tools',)
-print("   当前消息数:", len(st.values["messages"]))        # 2
-
-# ③ 人批准 → 不带新输入，用同一个 config 继续
-r1b = g1.invoke(None, cfg1)
-print("   最终回复:", r1b["messages"][-1].content)
-```
-
-### 2.2 三段逻辑逐个讲
-
-**① `interrupt_before=["tools"]`**：编译期声明"每次要进 tools 节点之前，先停下"。参数是**节点名列表**，可以写多个（比如 `["tools", "send_email"]`）。图照常跑到 agent 产出 tool_calls、`tools_condition` 判"该去 tools"的那一刻——**在迈步之前被拦下**。
-
-**② 暂停时的 state 长什么样**：
-
-```fallback
-messages = [
-  HumanMessage("帮我删掉 /tmp/a.txt"),
-  AIMessage(tool_calls=[delete_file(path="/tmp/a.txt")]),
-]
-                                    ← 缺这个：还没有 ToolMessage
-```
-
-**消息数是 2，且没有 ToolMessage**——这是"工具还没执行"的直接证据。配合工具函数里那句 `print("【工具真的被执行了】")`：暂停阶段它**没有出现**，resume 之后才出现。**两条合起来，才是"工具是在审批之后才跑的"铁证。**
-
-**③ 恢复为什么是 `invoke(None, cfg1)`**：哨卡式没有"问题"，所以也不需要答案——你只是告诉图"放行，继续跑"，输入传 `None` 即可。config 必须带**同一个 thread_id**，否则图不知道要续哪个档（换了 thread_id 就是开新档，暂停就丢了）。
-
-> ⚠️ 一个容易写错的 API：`r1.next` 是**不存在的**。`invoke()` 返回的是 state 的**值字典**（就是 `{"messages": [...]}` 这种内容），没有 `.next`；"下一步去哪"属于**执行进度**，挂在 `get_state(config)` 返回的快照对象上。
+> 今天终于把 LangGraph 的 HITL 串起来了。
 >
-> 类比：`invoke()` 给你的是**工单内容**（填了哪些格子）；`get_state()` 给你的是**工单 + 进度标签**（干到哪、下一步去哪个工位）。"下一步"写在进度标签上，不写在工单纸上。
+> 前面一直觉得 `interrupt()`、`Command(resume)`、`update_state`、`checkpoint` 是几个分散的 API，直到把代码跑通后才发现，它们其实只是在解决三个问题：
+>
+> ```text
+> 什么时候停？
+> 停下来以后怎么继续？
+> 人能不能修改下一步？
+> ```
+>
+> 这篇不展开讲理论，直接从代码看。
 
 ---
 
-## 三、方式二：`interrupt()` —— 节点内对话
+# 一、先看最终流程
 
-哨卡只能"拦住放行"，如果你要**问一句并收一个答案**，就得用节点内的 `interrupt()`。
+今天的代码最后是：
+
+```text
+START
+  ↓
+decide
+  ↓
+approve
+  ↓
+tools
+  ↓
+audit
+  ↓
+summarize
+  ↓
+END
+```
+
+其中：
+
+```text
+decide
+→ 模型决定要调用什么工具
+
+approve
+→ 人审批
+
+tools
+→ 真正执行
+
+audit
+→ 记录“这是审批人改的”
+
+summarize
+→ 最后总结，而且没有工具权限
+```
+
+今天还有一个额外实验：
+
+```text
+checkpoint
+   ↓
+get_state_history()
+   ↓
+挑历史存档
+   ↓
+Replay / Fork
+```
+
+---
+
+# 二、为什么 `decide` 和 `approve` 必须拆开？
+
+先看：
 
 ```python
-"""W6-D3 方式二：interrupt() —— 节点内提问，Command(resume=...) 回话"""
-from langgraph.types import interrupt, Command
-
-def agent_ask(state: S) -> dict:
-    last = state["messages"][-1].content
-    # ⭐ 暂停在这一行，把问题抛给调用方；用户 resume 时传的值会成为它的返回值
-    decision = interrupt({
-        "question": f"模型想执行危险操作: {last}",
-        "options": ["approve", "reject"],
-    })
-    if decision == "approve":
-        return {"messages": [("assistant", "【已获批准】继续执行")]}
-    return {"messages": [("assistant", "【已拒绝】取消删除操作")]}
-
-b2 = StateGraph(S)
-b2.add_node("agent", agent_ask)               # ← 换成会问人的 agent
-b2.add_node("tools", ToolNode([delete_file]))
-b2.add_edge(START, "agent")
-b2.add_conditional_edges("agent", tools_condition)
-b2.add_edge("tools", "agent")
-g2 = b2.compile(checkpointer=MemorySaver())    # ← 这里不写 interrupt_before
-
-cfg2 = {"configurable": {"thread_id": "hitl-2"}}
-
-# ① 跑到 interrupt() 处停住（某些版本会抛 GraphInterrupt，某些版本正常返回）
-try:
-    g2.invoke({"messages": [("user", "删掉 /tmp/b.txt")]}, cfg2)
-    print("② invoke 正常返回")
-except Exception as e:
-    print("② 收到暂停信号:", type(e).__name__)   # GraphInterrupt
-
-# ② 用 .next 确认它真的停了（这是唯一可靠的判据）
-st2 = g2.get_state(cfg2)
-print("   停在:", st2.next)                    # ('agent',)
-
-# ③ 人点"拒绝" → 把值送回 interrupt() 那一行
-out2 = g2.invoke(Command(resume="reject"), cfg2)
-print("   结果:", out2["messages"][-1].content)   # 【已拒绝】取消删除操作
+def decide(state):
+    ai_msg = llm.invoke(state["messages"])
+    return {"messages": [ai_msg]}
 ```
 
-### 3.1 三个必须想明白的点
+它只做一件事：
 
-**① `Command(resume="reject")` 里的值，是怎么"回到" `interrupt()` 那一行的？**
+> **让模型产生 `tool_calls`，然后先写进 state。**
 
-这是今天最反直觉的地方——**它不是"回到"那一行，而是把节点重新跑了一遍**。
+例如：
 
-流程是这样的：`interrupt()` 被调用时，框架把当前 state 和"停在第几个节点"存成 checkpoint，然后中断；你调用 `Command(resume="reject")` 时，框架读同一个 checkpoint，**从暂停的那个节点重新执行**，但当代码再次执行到 `interrupt(...)` 这一句时，框架不再中断，而是直接把 `"reject"` 当作它的返回值。
-
-```fallback
-第一次执行 agent_ask：
-   ... → interrupt(...) → 【保存 checkpoint，中断】
-
-resume 后重新执行 agent_ask：
-   ... → interrupt(...) → 【直接返回 "reject"，不中断】→ 继续往下走
+```text
+AIMessage
+└── tool_calls
+    └── delete_file("/tmp/a.txt")
 ```
 
-**所以：interrupt 之前的语句会被执行两次**（比如节点开头读 state、调 LLM 那些代码）。**不要把有副作用的操作（写库、发请求）写在 `interrupt()` 之前**——否则 resume 时会重复执行。这是 `interrupt()` 最需要记住的一条工程纪律。
-
-> 💡 顺带解释为什么节点必须"从开头重跑"：因为 Python 没有"从函数中间恢复"的能力，框架只能用"重放 + 让 interrupt 直接返回"来模拟。理解了这一点，`Command(resume=...)` 就不再是魔法了。
-
-**② `GraphInterrupt` 到底算不算报错？**
-
-**不算错，是"暂停信号"。** 但这里有个版本陷阱：**有些版本会抛出 `GraphInterrupt` 异常，有些版本 invoke 正常返回、图其实已经暂停了**。你那份运行的输出就属于后者——打印了"正常返回"，但 `get_state(config).next` 是 `('agent',)`，说明确实停住了。
-
-**结论：判断"图停没停"，永远看 `get_state(config).next` 是否非空，不要靠 try/except 猜。** 这也解释了为什么第一节那张 API 表要刻进脑子里。
-
-**③ 停在哪，`.next` 就指向哪**：
-
-- 哨卡式：停在 tools **之前** → `.next == ('tools',)`（下一步本来要去 tools）
-- 对话式：停在 agent **内部** → `.next == ('agent',)`（当前节点还没跑完）
-
-看到 `.next` 非空，就是图在等人。**这也是 D2 学的"state.next 是中断探针"真正派上用场的地方。**
-
-### 3.2 这一版的一个已知缺陷（先说清，D4 改）
-
-`agent_ask` 是**每次进 agent 都问人**——哪怕用户只是说"你好"，也会被拦下来问"是否批准"。因为它把 `interrupt()` 写在了节点最前面，无条件触发。
-
-更合理的做法是：**只在模型真的要调危险工具时才 interrupt**（判断 `tool_calls` 里有没有 `delete_file`）。这是 W6-D4 的改造点，今天先跑通机制。
-
----
-
-## 四、怎么证明"它真的停住了"
-
-HITL 最容易自欺的地方：你以为它停了，其实工具已经跑完了。所以验证要用**两条独立证据**，而不是一条：
-
-| 证据 | 怎么取 | 说明 |
-|---|---|---|
-| ① 暂停时没有 ToolMessage | `len(st.values["messages"]) == 2` | Human + AI(带 tool_calls)，**缺 ToolMessage** 说明工具没执行 |
-| ② 工具的执行标记只在 resume 后出现 | 工具里的 `print("【工具真的被执行了】")` | 暂停阶段没这行输出，resume 后才出现 = 审批之后才跑 |
-| ③ 停在哪 | `st.next` 非空 | 哨卡式 `('tools',)` / 对话式 `('agent',)` |
-
-**两条合起来才是铁证**：消息数 2 只能说明"还没回填结果"，如果工具其实已经跑过（比如用了 `interrupt_after` 而不是 `interrupt_before`），消息数会是 3（多一条 ToolMessage）、print 也会提前出现。**所以单看一条会被骗。**
-
-> 💡 把 `print` 塞进工具函数当"执行标记"，是验证 HITL 最省事的一招。它不依赖任何框架的调试工具，纯肉眼可见——**凡是"我以为它没跑"的怀疑，都可以靠一句 print 终结。**
-
----
-
-## 五、暂停 → 审批 → 继续的完整时序
-
-把两种方式的过程画成一张图，方便回看：
-
-```fallback
-【哨卡式 interrupt_before=["tools"]】
-
-invoke(用户输入) → agent 产出 tool_calls → 条件边判"去 tools"
-                                            │
-                                      ⛔ 哨卡拦下（保存 checkpoint）
-                                            │
-                      你：get_state(cfg).next == ('tools',)  ← 确认停住
-                      你：看 st.values["messages"] == 2 条     ← 确认工具没跑
-                                            │
-                      invoke(None, cfg) ────┘ 放行
-                                            │
-                              tools 执行 → 回 agent → 最终答案 → END
-
-
-【对话式 interrupt()】
-
-invoke(用户输入) → agent_ask 开始执行 → 遇到 interrupt({问题})
-                                            │
-                                      ⛔ 停住（保存 checkpoint，问题抛出）
-                                            │
-                      你：get_state(cfg).next == ('agent',)   ← 确认停住
-                      你：把问题展示给人 → 人点"拒绝"
-                                            │
-                      invoke(Command(resume="reject"), cfg)
-                                            │
-                      重放 agent_ask → interrupt() 直接返回 "reject"
-                                     → 走拒绝分支 → END
-```
-
-**两者共同的三要素**：暂停（checkpoint 记录位置与 state）、判据（`.next` 非空）、恢复（**同一个 thread_id** + `None` 或 `Command(resume=...)`）。
-
----
-
-## 六、完整可跑代码（两版合一）
-
-前面是分块讲，这一节把两种方式合成一个文件，可直接复制运行。跑完你会看到四段输出：哨卡停住 → 放行执行 → 对话停住 → 拒绝收尾。
+下一步才进入：
 
 ```python
-"""W6-D3: HITL —— interrupt_before 哨卡 vs interrupt() 对话（两版合一）"""
+def approve(state):
+    answer = interrupt(...)
+```
+
+这里有一个非常容易踩坑的地方：
+
+> `interrupt()` 恢复时，所在节点会重新执行。
+
+所以不能：
+
+```python
+def agent(state):
+    ai_msg = llm.invoke(...)
+    answer = interrupt(...)
+```
+
+因为第一次执行到 `interrupt()` 时，还没 `return`，`ai_msg` 还没进入 state。
+
+所以要拆成：
+
+```text
+decide
+→ 先落 state
+
+approve
+→ 再 interrupt
+```
+
+这样人暂停时，state 里已经有完整的 `AIMessage.tool_calls`。
+
+---
+
+# 三、`interrupt()` 到底怎么恢复？
+
+第一次：
+
+```text
+approve
+ ↓
+interrupt()
+ ↓
+暂停
+```
+
+人回答：
+
+```python
+Command(resume="approve")
+```
+
+恢复以后不是简单地从 `interrupt()` 下一行继续，而是：
+
+```text
+approve
+ ↓
+重新执行节点
+ ↓
+再次来到 interrupt()
+ ↓
+这次得到 "approve"
+ ↓
+继续
+```
+
+所以：
+
+```text
+[approve]
+[approve]
+```
+
+出现两次是正常的。
+
+这也意味着：
+
+> **`interrupt()` 前面最好不要放不可安全重跑的副作用。**
+
+---
+
+# 四、三态审批：`approve / reject / edit`
+
+现在人不只是：
+
+```text
+approve
+reject
+```
+
+还可以：
+
+```text
+edit
+```
+
+例如模型原本准备：
+
+```text
+delete_file("/tmp/a.txt")
+```
+
+人说：
+
+```text
+edit
+```
+
+然后图外：
+
+```python
+st = graph.get_state(cfg)
+
+last = st.values["messages"][-1]
+
+fixed = AIMessage(
+    id=last.id,
+    content=last.content,
+    tool_calls=new_tool_calls,
+)
+
+graph.update_state(
+    cfg,
+    {
+        "messages": [fixed],
+        "audit_note": "审批人把 a.txt 改成了 old.txt",
+    },
+)
+```
+
+这里最重要的是：
+
+```python
+id=last.id
+```
+
+因为 `add_messages` 会按照 message id 更新消息。
+
+保留原 id：
+
+```text
+原消息 → 替换
+```
+
+不保留：
+
+```text
+原消息 + 新消息
+```
+
+所以：
+
+> **改消息时，记得保留原 `id`。**
+
+---
+
+# 五、为什么 `edit` 没有自己的分支？
+
+代码其实是：
+
+```python
+if answer == "reject":
+    return {
+        "messages": [
+            AIMessage(content="已取消删除")
+        ]
+    }
+
+return {}
+```
+
+没有：
+
+```python
+if answer == "edit":
+```
+
+因为真正的“修改参数”已经在：
+
+```python
+graph.update_state(...)
+```
+
+里完成了。
+
+所以：
+
+```text
+reject
+→ 拦住
+
+approve
+→ 放行
+
+edit
+→ 图外已经修改
+→ 放行
+```
+
+`approve` 是**审批闸门**，不是编辑器。
+
+---
+
+# 六、为什么还要 `audit`？
+
+人把：
+
+```text
+/tmp/a.txt
+```
+
+改成：
+
+```text
+/tmp/old.txt
+```
+
+这个动作发生在图外。
+
+模型如果不知道这个变化，就可能觉得：
+
+> “为什么我刚才突然删了 old.txt？”
+
+所以：
+
+```python
+audit_note
+```
+
+专门记录：
+
+```text
+审批人主动把删除目标改成了 /tmp/old.txt
+```
+
+然后 `audit` 把它重新放进消息历史。
+
+所以：
+
+```text
+audit
+=
+给模型补上“为什么参数发生变化”的上下文
+```
+
+这就是我这里说的：
+
+> **治叙事。**
+
+---
+
+# 七、为什么 `summarize` 不绑定工具？
+
+如果最后还是：
+
+```python
+llm.bind_tools(...)
+```
+
+模型有可能：
+
+```text
+工具执行
+ ↓
+模型
+ ↓
+又产生 tool_calls
+ ↓
+再执行
+```
+
+单靠提示词：
+
+```text
+不要重试
+```
+
+属于软约束。
+
+所以最后换成：
+
+```python
+llm_summarize = ChatOpenAI(...)
+```
+
+不绑定工具。
+
+于是：
+
+```text
+tools
+ ↓
+audit
+ ↓
+summarize
+ ↓
+END
+```
+
+最后这个模型根本没有工具可以调用。
+
+> **Prompt 是说明书，不是锁。**
+
+---
+
+# 八、`thread_id` 和 `checkpoint_id` 终于分清了
+
+这个是我这次口述里答错的地方。
+
+不要再把两个 id 混在一起。
+
+```text
+thread_id
+=
+我是谁
+=
+哪个存档槽
+```
+
+```text
+checkpoint_id
+=
+我在哪一帧
+=
+这个槽里的哪个 checkpoint
+```
+
+可以记成：
+
+```text
+thread_id      → 账户号
+checkpoint_id  → 交易流水号
+```
+
+所以：
+
+> **身份是 `thread_id`，时间是 `checkpoint_id`。**
+
+---
+
+# 九、`interrupt_before` 和 `interrupt()` 也不要混
+
+两者最大的区别不是“谁能修改 state”。
+
+真正应该分两个维度：
+
+|                | `interrupt_before`     | `interrupt()`           |
+| -------------- | ---------------------- | ----------------------- |
+| 停在哪里           | 节点边界                   | 节点内部                    |
+| `resume` 传值    | ❌                      | ✅                       |
+| `update_state` | ✅                      | ✅                       |
+| 恢复             | `invoke(None, config)` | `Command(resume=value)` |
+
+所以：
+
+```text
+interrupt_before
+→ 没有 resume 通道
+≠
+不能 update_state
+```
+
+这一点一定要记住。
+
+---
+
+# 十、`.values / .next / .config`
+
+执行：
+
+```python
+st = graph.get_state(cfg)
+```
+
+以后，先看三个东西：
+
+```python
+st.values
+st.next
+st.config
+```
+
+我现在的记法：
+
+```text
+.values
+→ 内容
+
+.next
+→ 下一步
+
+.config
+→ 这份状态的定位信息
+```
+
+尤其是：
+
+```python
+st.next
+```
+
+它是判断图有没有结束的好工具：
+
+```text
+next != ()
+→ 还有工作
+
+next == ()
+→ 已结束
+```
+
+例如：
+
+```text
+interrupt_before["tools"]
+
+next == ("tools",)
+```
+
+说明：
+
+> agent 已经跑完，tools 还没跑。
+
+而：
+
+```text
+interrupt() 写在 agent 内
+
+next == ("agent",)
+```
+
+说明：
+
+> agent 本身还没结束。
+
+---
+
+# 十一、checkpoint 为什么能变成“时间旅行”？
+
+有了：
+
+```python
+checkpointer = MemorySaver()
+```
+
+每个线程会保存历史 checkpoint。
+
+于是：
+
+```python
+graph.get_state_history(config)
+```
+
+就可以拿到存档列表。
+
+然后：
+
+```python
+snap.config
+```
+
+可以作为这份存档的钥匙。
+
+所以：
+
+```python
+graph.invoke(
+    None,
+    snap.config,
+)
+```
+
+就是：
+
+> **从这个历史 checkpoint 继续。**
+
+这就是 Replay。
+
+---
+
+# 十二、怎么证明真的只重跑了 B/C？
+
+不能只说：
+
+> “我看日志。”
+
+应该写断言：
+
+```python
+assert "→ B 执行" in txt_replay
+assert "→ C 执行" in txt_replay
+assert "→ A 执行" not in txt_replay
+```
+
+最关键的是：
+
+```text
+A 没出现。
+```
+
+因为：
+
+```text
+B 出现 + C 出现
+```
+
+只能证明它们跑了。
+
+而：
+
+```text
+A 没出现
+```
+
+才能证明：
+
+> **没有从头跑。**
+
+这也是今天我最想留下来的一个工程习惯：
+
+> **不仅验证“应该发生什么”，还要验证“不应该发生什么”。**
+
+---
+
+# 十三、Replay 和 Fork
+
+Replay：
+
+```python
+graph.invoke(
+    None,
+    target.config,
+)
+```
+
+意思：
+
+> 原样读档。
+
+Fork：
+
+```python
+new_cfg = graph.update_state(
+    target.config,
+    {
+        "way": "另一种方式"
+    },
+)
+
+graph.invoke(
+    None,
+    new_cfg,
+)
+```
+
+意思：
+
+> 改档后，再发展一条新的未来。
+
+所以：
+
+```text
+Replay
+= 读档重玩
+
+Fork
+= 读档 + 改属性 + 重玩
+```
+
+而且原来的 checkpoint 还在。
+
+---
+
+# 十四、今天最终记住这 8 句话
+
+```text
+1. checkpointer = HITL / checkpoint 的存档基础
+
+2. thread_id = 哪个 thread / 哪个存档槽
+
+3. checkpoint_id = 这个 thread 的哪一帧
+
+4. interrupt_before = 节点边界哨卡
+
+5. interrupt() = 节点内部对话
+
+6. resume = 图内传值
+   update_state = 图外改档
+
+7. replay = 原样从历史 checkpoint 继续
+
+8. fork = 修改历史 state 后产生另一条未来
+```
+
+再加一句验证原则：
+
+> **日志里“没有 A”，和“出现 B/C”一样重要。**
+
+---
+
+# 十五、完整源码
+
+下面这份就是今天的核心实验代码。
+
+为了学习方便，我把注释写得比较详细，但业务逻辑本身尽量保持简单。
+
+```python
+"""
+W6-D4：LangGraph HITL
+三态审批 + 改参 + 审计留痕 + 结构收口
+
+学习目标：
+
+1. interrupt()
+2. Command(resume=...)
+3. update_state()
+4. tool_calls 改参
+5. audit
+6. 无工具 summarize
+"""
+
 import os
+
 from dotenv import load_dotenv
-load_dotenv(override=True)   # 想钉死项目根：load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+
+load_dotenv(override=True)
+
 
 from typing import Annotated, TypedDict
+
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
-from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt import ToolNode
 from langgraph.types import interrupt, Command
+
 from langchain_core.tools import tool
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
-# ── 危险工具：print 是"执行标记"，用来验证工具到底什么时候跑的 ──
+
+# ============================================================
+# 1. 工具
+# ============================================================
+
 @tool
 def delete_file(path: str) -> str:
-    """【危险】删除本地文件"""
-    print(f"【工具真的被执行了】路径: {path}")
-    return f"文件已删除: {path}"
+    """
+    演示工具。
+
+    不真的删除文件，只打印执行结果。
+    """
+
+    print(f">>> 工具真身执行：删除 {path}")
+
+    return f"文件已删除：{path}"
+
+
+# ============================================================
+# 2. State
+# ============================================================
 
 class S(TypedDict):
+
+    # 对话历史
+    #
+    # add_messages 会负责消息的追加 / 更新。
     messages: Annotated[list, add_messages]
 
-llm = ChatOpenAI(
-    model="deepseek-v4-flash",
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    base_url="https://api.deepseek.com",
-    temperature=0,
-).bind_tools([delete_file])
+    # 普通字段：
+    # 专门记录审批人的操作。
+    audit_note: str
 
-# 普通 agent：只负责产出决策（可能带 tool_calls）
-def agent_node(state: S) -> dict:
-    return {"messages": [llm.invoke(state["messages"])]}
 
-# 会问人的 agent：节点内 interrupt()（本版无条件触发，D4 再加条件）
-def agent_ask(state: S) -> dict:
-    last = state["messages"][-1].content
-    decision = interrupt({                       # ← 停在这一行，问题抛给调用方
-        "question": f"模型想执行危险操作: {last}",
-        "options": ["approve", "reject"],
-    })
-    if decision == "approve":
-        return {"messages": [("assistant", "【已获批准】继续执行")]}
-    return {"messages": [("assistant", "【已拒绝】取消删除操作")]}
+# ============================================================
+# 3. 两个 LLM
+# ============================================================
 
-def build(agent_fn, **compile_kw):
-    """同一份拓扑，换个 agent 节点 / 换个编译参数就能出两版图"""
-    b = StateGraph(S)
-    b.add_node("agent", agent_fn)
-    b.add_node("tools", ToolNode([delete_file]))
-    b.add_edge(START, "agent")
-    b.add_conditional_edges("agent", tools_condition)
-    b.add_edge("tools", "agent")
-    return b.compile(checkpointer=MemorySaver(), **compile_kw)
+_common = {
+    "model": os.getenv(
+        "DEEPSEEK_MODEL",
+        "deepseek-v4-flash",
+    ),
+    "api_key": os.getenv(
+        "DEEPSEEK_API_KEY",
+    ),
+    "base_url": os.getenv(
+        "DEEPSEEK_BASE_URL",
+        "https://api.deepseek.com",
+    ),
+    "temperature": 0,
+}
 
-if __name__ == "__main__":
-    # ══════ 方式一：哨卡 —— 进 tools 之前必停 ══════
-    g1 = build(agent_node, interrupt_before=["tools"])
-    cfg1 = {"configurable": {"thread_id": "hitl-1"}}
 
-    g1.invoke({"messages": [("user", "帮我删掉 /tmp/a.txt")]}, cfg1)
-    st = g1.get_state(cfg1)                      # 进度信息在这里，不在 invoke 返回值上
-    print("① 暂停！下一步将执行:", st.next)         # ('tools',)
-    print("   当前消息数:", len(st.values["messages"]))      # 2 → 还没有 ToolMessage
-    # 此刻不应出现「工具真的被执行了」——出现了就说明没拦住
+# 决策模型：
+# 有工具。
+llm_decide = ChatOpenAI(
+    **_common
+).bind_tools(
+    [delete_file]
+)
 
-    r1b = g1.invoke(None, cfg1)                  # 批准：同一个 config，输入传 None
-    print("   最终回复:", r1b["messages"][-1].content)
 
-    # ══════ 方式二：对话 —— 节点内提问、收回答案 ══════
-    g2 = build(agent_ask)                        # 不传 interrupt_before
-    cfg2 = {"configurable": {"thread_id": "hitl-2"}}
+# 收口模型：
+# 没有工具。
+#
+# 这样最后只能总结，
+# 不能再次产生 tool_calls。
+llm_summarize = ChatOpenAI(
+    **_common
+)
 
-    try:
-        g2.invoke({"messages": [("user", "删掉 /tmp/b.txt")]}, cfg2)
-        print("② invoke 正常返回（本版本不抛异常，但图已暂停）")
-    except Exception as e:
-        print("② 收到暂停信号:", type(e).__name__)   # 有的版本抛 GraphInterrupt
 
-    st2 = g2.get_state(cfg2)
-    print("   停在:", st2.next)                  # ('agent',) = 停在 agent 内部
+# ============================================================
+# 4. decide
+# ============================================================
 
-    out2 = g2.invoke(Command(resume="reject"), cfg2)   # 人点"拒绝"
-    print("   结果:", out2["messages"][-1].content)    # 【已拒绝】取消删除操作
-```
+def decide(state: S) -> dict:
+    """
+    决策官。
 
-**跑之前心里有数的四段预期**：
+    只负责：
+    让模型决定要不要调用工具。
 
-```fallback
-① 暂停！下一步将执行: ('tools',)
-   当前消息数: 2                      ← 此时还没出现「工具真的被执行了」
-   最终回复: 文件已删除: /tmp/a.txt     ← resume 之后才出现执行标记
-② invoke 正常返回 / 或 GraphInterrupt
-   停在: ('agent',)
-   结果: 【已拒绝】取消删除操作
+    注意：
+    这里不能先 interrupt，
+    因为 AIMessage 需要先 return，
+    才会真正进入 state。
+    """
+
+    ai_msg = llm_decide.invoke(
+        state["messages"]
+    )
+
+    print(
+        "[decide] tool_calls =",
+        len(ai_msg.tool_calls),
+    )
+
+    return {
+        "messages": [ai_msg]
+    }
+
+
+# ============================================================
+# 5. approve
+# ============================================================
+
+def approve(state: S) -> dict:
+    """
+    审批官。
+
+    读取上一条 AIMessage，
+    找到模型准备执行的 tool_call，
+    然后问人。
+    """
+
+    last = state["messages"][-1]
+
+    if not (
+        isinstance(last, AIMessage)
+        and last.tool_calls
+    ):
+        return {}
+
+    tc = last.tool_calls[0]
+
+    print(
+        "[approve] 待审批参数：",
+        tc["args"],
+    )
+
+    # interrupt 第一次运行会暂停。
+    #
+    # resume 后这个节点会重新执行，
+    # 再次来到这里时，
+    # interrupt() 会直接返回 resume 值。
+    answer = interrupt(
+        {
+            "question": (
+                f"模型想删除 "
+                f"{tc['args']['path']}，"
+                f"批准吗？"
+            ),
+            "options": [
+                "approve",
+                "reject",
+                "edit",
+            ],
+        }
+    )
+
+    # reject：
+    # 返回一条没有 tool_calls 的消息。
+    #
+    # 后面路由看到没有 tool_calls，
+    # 就会 END。
+    if answer == "reject":
+
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "已取消删除，"
+                        "本次未执行任何操作。"
+                    )
+                )
+            ]
+        }
+
+    # approve / edit：
+    #
+    # 两者都直接放行。
+    #
+    # edit 真正修改参数的动作，
+    # 已经在图外 update_state() 完成。
+    return {}
+
+
+# ============================================================
+# 6. audit
+# ============================================================
+
+def audit(state: S) -> dict:
+    """
+    把人工修改重新注入消息历史。
+
+    解决：
+    “为什么实际参数和原来不一样？”
+    """
+
+    note = state.get(
+        "audit_note",
+        "",
+    )
+
+    if not note:
+        return {}
+
+    print(
+        "[audit]",
+        note,
+    )
+
+    return {
+        "messages": [
+            HumanMessage(
+                content=(
+                    f"【审批人操作记录】{note}。"
+                    "这是审批人主动、有意做出的决定，"
+                    "已获批准执行。"
+                    "这不是错误，无需重试，"
+                    "请直接总结实际结果。"
+                )
+            )
+        ],
+
+        # 用完清空
+        "audit_note": "",
+    }
+
+
+# ============================================================
+# 7. summarize
+# ============================================================
+
+def summarize(state: S) -> dict:
+    """
+    收口。
+
+    这里故意使用没有绑定工具的 LLM。
+    """
+
+    ai_msg = llm_summarize.invoke(
+        state["messages"]
+    )
+
+    print(
+        "[summarize] tool_calls = 0"
+    )
+
+    return {
+        "messages": [ai_msg]
+    }
+
+
+# ============================================================
+# 8. decide 后的路由
+# ============================================================
+
+def route_after_decide(state: S):
+
+    last = state["messages"][-1]
+
+    if (
+        isinstance(last, AIMessage)
+        and last.tool_calls
+    ):
+        return "approve"
+
+    return END
+
+
+# ============================================================
+# 9. approve 后的路由
+# ============================================================
+
+def route_after_approve(state: S):
+
+    last = state["messages"][-1]
+
+    if (
+        isinstance(last, AIMessage)
+        and last.tool_calls
+    ):
+        return "tools"
+
+    return END
+
+
+# ============================================================
+# 10. 构图
+# ============================================================
+
+builder = StateGraph(S)
+
+builder.add_node(
+    "decide",
+    decide,
+)
+
+builder.add_node(
+    "approve",
+    approve,
+)
+
+builder.add_node(
+    "tools",
+    ToolNode([delete_file]),
+)
+
+builder.add_node(
+    "audit",
+    audit,
+)
+
+builder.add_node(
+    "summarize",
+    summarize,
+)
+
+
+# START → decide
+
+builder.add_edge(
+    START,
+    "decide",
+)
+
+
+# decide → approve / END
+
+builder.add_conditional_edges(
+    "decide",
+    route_after_decide,
+    {
+        "approve": "approve",
+        END: END,
+    },
+)
+
+
+# approve → tools / END
+
+builder.add_conditional_edges(
+    "approve",
+    route_after_approve,
+    {
+        "tools": "tools",
+        END: END,
+    },
+)
+
+
+# tools → audit → summarize → END
+
+builder.add_edge(
+    "tools",
+    "audit",
+)
+
+builder.add_edge(
+    "audit",
+    "summarize",
+)
+
+builder.add_edge(
+    "summarize",
+    END,
+)
+
+
+# ============================================================
+# 11. 编译
+# ============================================================
+
+graph = builder.compile(
+    checkpointer=MemorySaver()
+)
+
+
+# ============================================================
+# 12. C 场景：edit
+# ============================================================
+
+cfg = {
+    "configurable": {
+        "thread_id": "w6-d4-edit",
+    }
+}
+
+
+# ------------------------------------------------------------
+# 第一次运行
+#
+# 图会走到：
+#
+# START
+#   ↓
+# decide
+#   ↓
+# approve
+#   ↓
+# interrupt
+#
+# 然后暂停。
+# ------------------------------------------------------------
+
+graph.invoke(
+    {
+        "messages": [
+            (
+                "user",
+                "帮我删除 /tmp/a.txt",
+            )
+        ],
+        "audit_note": "",
+    },
+    cfg,
+)
+
+
+# ============================================================
+# 13. 查看暂停时的 state
+# ============================================================
+
+st = graph.get_state(cfg)
+
+print("\n当前 next =", st.next)
+
+print(
+    "当前消息数量 =",
+    len(st.values["messages"]),
+)
+
+last = st.values["messages"][-1]
+
+print(
+    "当前 tool_calls =",
+    last.tool_calls,
+)
+
+
+# ============================================================
+# 14. 修改 pending tool_call
+# ============================================================
+
+new_tool_calls = [
+    {
+        **tc,
+
+        # 只修改 path，
+        # 其它参数保留。
+        "args": {
+            **tc["args"],
+            "path": "/tmp/old.txt",
+        },
+    }
+    for tc in last.tool_calls
+]
+
+
+# ------------------------------------------------------------
+# ★ 关键：
+# 必须保留原来的 message id。
+#
+# 表示：
+# “更新刚才那条消息”
+#
+# 而不是：
+# “新增一条消息”
+# ------------------------------------------------------------
+
+fixed = AIMessage(
+    id=last.id,
+    content=last.content,
+    tool_calls=new_tool_calls,
+)
+
+
+# ============================================================
+# 15. 改档 + 写审计
+# ============================================================
+
+graph.update_state(
+    cfg,
+    {
+        "messages": [fixed],
+
+        "audit_note": (
+            "审批人把删除目标从 "
+            "/tmp/a.txt 改成了 "
+            "/tmp/old.txt"
+        ),
+    },
+)
+
+
+# ============================================================
+# 16. resume
+# ============================================================
+#
+# edit 已经体现在 state 里。
+#
+# resume("edit") 只是告诉 approve：
+# “人的答案是 edit。”
+#
+# 然后 approve 放行。
+# ============================================================
+
+result = graph.invoke(
+    Command(
+        resume="edit"
+    ),
+    cfg,
+)
+
+
+print(
+    "\n最终结果：",
+    result["messages"][-1].content,
+)
+
+
+# ============================================================
+# 17. 最终验收
+# ============================================================
+
+final_state = graph.get_state(cfg)
+
+print(
+    "\n最终 next =",
+    final_state.next,
+)
+
+print(
+    "最后一条 tool_calls =",
+    getattr(
+        final_state.values["messages"][-1],
+        "tool_calls",
+        None,
+    ),
+)
+
+# 理论上的最终状态应该：
+#
+# next == ()
+#
+# 表示图结束。
 ```
 
 ---
 
-## 七、踩坑记
+# 四十三、这一篇我以后真正需要回看的地方
 
-| # | 坑 | 解法 |
-|---|---|---|
-| 1 | 🔴 把 `GraphInterrupt` 当报错 | 它是暂停信号；**判断停没停只看 `get_state(config).next`**，别靠 try/except |
-| 2 | 🔴 用 `invoke()` 的返回值取 `.next` | 返回值是 state 值字典（dict），没有 `.next`。进度在 `get_state()` 快照上 |
-| 3 | 🔴 resume 时换了 thread_id | 暂停和继续必须同一把钥匙。换号 = 开新档 = 从头跑、消息重复 |
-| 4 | 🔴 没配 checkpointer | HITL 的硬前提。没有它，图停不下来也续不上 |
-| 5 | 🔴 把有副作用的代码写在 `interrupt()` 之前 | resume 会重放节点，**这些代码会执行两次**（写库/发请求要特别小心） |
-| 6 | ⚠️ 工具没用 `@tool` 声明 | `bind_tools` / `ToolNode` 要的是标准工具对象，裸函数会出问题 |
-| 7 | ⚠️ 分不清停"之前"还是"内部" | `.next == ('tools',)` = 拦在 tools 前；`.next == ('agent',)` = 停在 agent 内 |
-| 8 | ⚠️ 无条件 `interrupt()` 导致每轮都问人 | 加判断：只在模型真要调危险工具时才 interrupt（D4 改造） |
+不用重新读全文。
 
----
+直接看这张：
 
-## 八、速查卡片（复习直接看这）
+```text
+┌──────────────────────────────────────┐
+│           D3 / D4 速查               │
+├──────────────────────────────────────┤
+│ thread_id       = 哪个会话 / 存档槽   │
+│ checkpoint_id   = 哪一帧             │
+│                                      │
+│ interrupt_before = 节点前哨卡         │
+│ interrupt()      = 节点内部问人       │
+│                                      │
+│ resume           = 图内传值            │
+│ update_state     = 图外改档            │
+│                                      │
+│ values           = state 内容          │
+│ next             = 下一步              │
+│ config           = 定位这份快照的钥匙   │
+│                                      │
+│ Replay = 原样读档                     │
+│ Fork   = 改档后产生新未来              │
+└──────────────────────────────────────┘
+```
 
-**接线**：
+以及最重要的两个判据：
 
 ```python
-# 哨卡式
-g = builder.compile(checkpointer=MemorySaver(), interrupt_before=["tools"])
-g.invoke(payload, cfg)          # 跑到哨卡前自动停
-g.invoke(None, cfg)             # 放行继续
+# 图有没有结束？
+state.next == ()
 
-# 对话式（节点内）
-decision = interrupt({"question": "...", "options": [...]})   # 停住并提问
-g.invoke(Command(resume="reject"), cfg)                       # 把答案传回去
+# Replay 是不是从头跑了？
+assert "→ A 执行" not in replay_log
 ```
 
-**三问三答**：
+这就够了。
 
-| 想干嘛 | 用哪个 |
-|---|---|
-| 看 state 内容（messages 等） | `invoke()` 返回值 或 `get_state(cfg).values` |
-| 看停在哪 / 下一步去哪 | `get_state(cfg).next` |
-| 判断"图到底停没停" | `.next` 非空 = 暂停中，**别靠 try/except 猜** |
-
-**一句话速记**：
-
-- HITL = 暂停 → 人决策 → 从暂停处继续；**checkpointer 是它的地基**
-- 哨卡固定拦（只能放行），对话能问能收答案（`Command(resume=...)`）
-- `interrupt()` 靠"重放节点"实现，所以它前面的代码会跑两次
-- 暂停与继续，**同一个 thread_id**
-
----
-
-## 九、一句话总结 + 下一篇预告
-
-**HITL 的本质是"checkpointer 暂停 + 人工干预 + resume 恢复"：哨卡式的 `interrupt_before` 在编译期声明、固定拦在节点边界，只能放行；对话式的 `interrupt()` 在节点内部调用，能把问题抛给用户，再用 `Command(resume=值)` 把答案传回节点内部——它靠"重放节点 + 让 `interrupt()` 直接返回值"实现，所以 `interrupt()` 之前的代码会执行两次。两种方式都硬性依赖 checkpointer：没有存档，图既不知道停在哪，也没法从暂停处续跑。** 而判断"它真的停了"不能看异常，要看 `get_state(config).next` 是否非空。
-
-W6-D4 会把今天的机制改造成真正能用的审批流：**三态审批（放行 / 拒绝 / 改参数）**——拒绝之外还能让人改掉工具参数再执行；**`update_state` 人工修正**——你 D2 学过的"外部改档"在这里成为纠正 Agent 的手段；以及**时间旅行回放**——回到某个 checkpoint 换一条路重跑。顺带把今天那个"每轮都问人"的 `agent_ask` 改造成**只在模型真想调危险工具时才 interrupt**。
-
-**魔鬼代言人**：如果跑通之后你冒出"这不就是加了个暂停按钮吗"的念头——**机制上确实如此**，难的是工程细节：resume 时到底要传什么（`None` 还是 `Command`）、节点重放会不会把副作用跑两遍、人在半路改了主意（`update_state` 改档）会不会和原 state 冲突、以及最要命的一点——**你的审批界面怎么知道该问什么**。今天代码里那句 `print` 就是你的"审批界面"；真实产品里，它是前端弹窗、是企业微信审批流、是一张工单。**框架负责"停得住、续得上"，"问什么、怎么问、谁来答"是你的产品问题——别指望框架替你决定。**
-
-**自查三问**（能答上 = 真懂了）：① 哨卡式暂停时 `st.next` 是 `('tools',)`，对话式是 `('agent',)`——为什么指向的节点不同？② `Command(resume="reject")` 的值"回到" `interrupt()` 那一行，实际发生了什么？这带来什么工程纪律？③ 你的版本里 `interrupt()` 不抛异常、invoke 正常返回——你该用什么判断图到底停没停？
+> **以后忘了，就回来查；不用重新学一遍。**
