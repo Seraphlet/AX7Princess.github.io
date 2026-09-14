@@ -1,7 +1,7 @@
 ---
 description: ""
-title: "克隆一个 GitHub 项目后，我该做什么？"
-draft: true
+title: "拿到一个新项目后，正式开发前我会做什么？"
+draft: false
 date: "2026-09-14T04:07:06+08:00"
 slug: "engering"
 categories:
