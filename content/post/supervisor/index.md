@@ -1,1706 +1,1627 @@
 ---
 description: ""
-title: "多 Agent 概念 + Supervisor 架构设计"
+title: "Supervisor 模式：让一个 Agent 负责调度，多个 Worker 负责执行"
 draft: false
-date: "2026-09-14T23:58:08+08:00"
+date: "2026-09-15T07:16:45+08:00"
 slug: "Supervisor"
 categories:
- - Langraph
+ - LangGraph
+ - Agent
 tags:
  - Supervisor
 image: ""
 ---
 
-# W7-Day1｜多 Agent 概念 + Supervisor 架构设计
+# W7-Day2｜Supervisor 模式：让一个 Agent 负责调度，多个 Worker 负责执行
 
-> 今天是理论日，不写代码。
->
-> 今天真正要理解的不是“Supervisor 的 API 怎么写”，而是：
->
-> **为什么需要多 Agent、Agent 应该怎么拆、Supervisor 到底在调度什么、Agent 之间怎么通信，以及它和我之前学过的 Tool Routing 到底是什么关系。**
+昨天主要是在画 Supervisor 模式的图，今天开始真正把它写成代码。
 
----
-
-# 一、今天先建立一个总认识：多 Agent 到底是什么？
-
-之前接触 Agent 的时候，我已经知道一种基本结构：
+今天的 Demo 是一个 Supervisor + 3 个 Worker 的多 Agent 流程：
 
 ```text
-用户
- ↓
-Agent
- ↓
-判断需要什么
- ↓
-Tool
- ↓
-返回结果
- ↓
-Agent 再决定下一步
+                    ┌──────────────┐
+                    │  supervisor  │
+                    │  决定下一步   │
+                    └──────┬───────┘
+                           │
+             ┌─────────────┼─────────────┐
+             ▼             ▼             ▼
+        researcher       writer       reviewer
+             │             │             │
+             └─────────────┴─────────────┘
+                           │
+                           ▼
+                       supervisor
+                           │
+                    FINISH → END
 ```
 
-比如：
+三个 Worker 分工：
 
 ```text
-用户：帮我查一下这个公司的最新信息
-
-Agent
- ↓
-判断需要搜索
- ↓
-Search Tool
- ↓
-返回搜索结果
- ↓
-Agent 再决定下一步
+researcher → 查资料
+writer     → 写文章
+reviewer   → 审文章
 ```
 
-今天学习多 Agent 后，我发现一个非常有意思的事情：
+最重要的不是“有三个 Agent”，而是：
 
-> **Supervisor 调度 Worker，和 Agent 调度 Tool，在控制结构上其实非常像。**
+> **Worker 负责执行，Supervisor 负责决定下一步。**
 
-它们都可以抽象成：
+所以实际运行不是一条固定流水线：
 
 ```text
-决策者
-   ↓
-选择一个执行单元
-   ↓
-执行
-   ↓
-返回结果
-   ↓
-再次决策
+researcher → writer → reviewer
 ```
 
-所以：
+而是一个循环：
 
 ```text
-Tool Routing
+supervisor
     ↓
-选择一个 Tool
-
-Supervisor Routing
+researcher
     ↓
-选择一个 Worker
-```
-
-这两个结构看起来非常接近。
-
-但真正的区别不在“是不是路由”，而在于：
-
-> **被路由的那个东西，到底有多强的自治能力。**
-
-这个区别是今天理解多 Agent 的一个重要切入口。
-
----
-
-# 二、先把 Tool、Agent、Worker、Supervisor 放到同一张图里
-
-可以先用一个层级去理解：
-
-```text
-函数
- ↓
-Tool
- ↓
-Agent
- ↓
-Worker
- ↓
-Supervisor
- ↓
-整个 Agent System
-```
-
-这不是 LangGraph 官方规定的分类，而是我今天用来建立架构直觉的一种方式。
-
-越往上，通常意味着：
-
-```text
-职责更完整
-状态更多
-决策更多
-生命周期更长
-```
-
----
-
-# 三、Tool 和 Worker 为什么看起来很像？
-
-先看 Tool。
-
-一个普通 Tool 大概是：
-
-```text
-输入
- ↓
-执行固定能力
- ↓
-输出
-```
-
-比如：
-
-```text
-search(query)
-```
-
-它通常不会自己思考：
-
-```text
-“我要不要调用另一个 Tool？”
-“我要不要重新定义任务？”
-“我要不要把结果交给 reviewer？”
-```
-
-它的主要职责是：
-
-> **提供一个可被调用的能力。**
-
----
-
-而 Worker 不一样。
-
-例如：
-
-```text
-Supervisor
-   ↓
-Researcher
-```
-
-Researcher 接收到任务后，它可能自己：
-
-```text
-理解任务
- ↓
-决定怎么查
- ↓
-调用搜索工具
- ↓
-分析搜索结果
- ↓
-判断是否需要继续查
- ↓
-整理结果
- ↓
-返回研究结论
-```
-
-所以 Worker 更接近：
-
-> **一个有自己任务目标、上下文和执行逻辑的 Agent。**
-
-也就是说：
-
-```text
-Supervisor
-   ↓
-Worker
-   ↓
-Agent
-   ↓
-Tools
-```
-
-从 Supervisor 的角度看：
-
-> Worker 是一个更高级的“能力模块”。
-
-从 Worker 自己的角度看：
-
-> Worker 内部又可能是一个完整 Agent。
-
----
-
-# 四、所以我之前想到的“自己的 buffer”到底意味着什么？
-
-这个问题很有意思。
-
-如果一个 Tool 有：
-
-```text
-自己的 buffer
-自己的状态
-自己的 invoke
-自己的内部处理流程
-```
-
-它会越来越像一个独立模块。
-
-但这里要特别注意：
-
-> **有 State，不等于就是 Agent。**
-
-例如：
-
-```text
-Search Tool
-  └── 保存最近 100 次查询
-```
-
-虽然它有状态，但它仍然可以只是：
-
-```text
-输入
- ↓
-执行
- ↓
-输出
-```
-
-真正让一个组件越来越接近 Agent 的，不只是“有状态”，而是：
-
-```text
-状态
-+
-目标
-+
-决策
-+
-行动
-+
-控制循环
-```
-
-所以可以这样区分：
-
-| 类型         | 状态  | 自己决策 | 自己目标  | 控制循环 |
-| ---------- | --- | ---- | ----- | ---- |
-| 普通函数       | 通常无 | 无    | 无     | 无    |
-| Tool       | 可有  | 很少   | 通常没有  | 通常无  |
-| Agent      | 有   | 有    | 有     | 通常有  |
-| Worker     | 有   | 有    | 有明确职责 | 有    |
-| Supervisor | 有   | 有    | 是调度目标 | 有    |
-
-这里真正应该抓住的是：
-
-> **不是名字决定它是什么，而是它拥有多少控制权。**
-
----
-
-# 五、这个发现让我重新理解“Supervisor”
-
-之前容易把 Supervisor 理解成：
-
-> 一个特殊的 Agent。
-
-现在看，它更准确的理解是：
-
-> **一个负责“Agent Routing”的中央调度者。**
-
-也就是：
-
-```text
-Tool Routing：
-
-Agent
-  ↓
-选择 Tool
-  ↓
-Tool 执行
-  ↓
-返回结果
-  ↓
-Agent 再决策
-```
-
-而：
-
-```text
-Supervisor Routing：
-
-Supervisor
-  ↓
-选择 Worker
-  ↓
-Worker 执行
-  ↓
-返回结果
-  ↓
-Supervisor 再决策
-```
-
-于是：
-
-```text
-Tool Routing
-    =
-在 Tool 层做路由
-
-Supervisor Routing
-    =
-在 Agent / Worker 层做路由
-```
-
-这就是两者非常像的根本原因。
-
----
-
-# 六、那么为什么还要搞多 Agent？
-
-这里回到多 Agent 本身。
-
-多 Agent 首先不是：
-
-> “让系统更聪明。”
-
-而是：
-
-> **把复杂任务拆成多个具有不同职责、工具和验收标准的执行单元。**
-
-所以：
-
-```text
-多 Agent ≠ 更强的大脑
-
-多 Agent = 分工系统
-```
-
-例如一个复杂写作任务：
-
-```text
-题目
- ↓
-Planner
- ↓
-Researcher
- ↓
-Writer
- ↓
-Reviewer
- ↓
-Reviser
- ↓
-最终文章
-```
-
-这里每一个角色关注的是不同事情。
-
----
-
-# 七、单 Agent 为什么会遇到瓶颈？
-
-## 1. 上下文争抢
-
-一个 Agent 同时负责：
-
-```text
-搜索
-写作
-审查
-修改
-工具调用
-记忆
-```
-
-所有信息进入一个上下文。
-
-于是：
-
-```text
-工具越来越多
-+
-Prompt 越来越长
-+
-历史越来越长
-=
-上下文越来越复杂
-```
-
----
-
-## 2. 职责耦合
-
-比如：
-
-```text
-“你负责查资料 + 写文章 + 自己审核 + 自己修改”
-```
-
-Prompt 会越来越长。
-
-修改某一部分要求，还可能影响另外的行为。
-
-所以真正的问题不是“Agent 不够聪明”，而是：
-
-> **职责开始互相耦合。**
-
----
-
-## 3. 不容易表达真正不同的角色
-
-例如：
-
-```text
-Writer：
-目标是把文章写好。
-
-Reviewer：
-目标是主动挑错。
-```
-
-这两个目标并不完全一致。
-
-如果让一个 Agent：
-
-```text
-先写
-然后自己批评自己
-再自己决定通过
-```
-
-很容易变成：
-
-> 自己写 → 自己检查 → 自己觉得没问题 → 自己通过。
-
-所以把角色拆开，本质上是在建立：
-
-> **独立视角。**
-
----
-
-# 八、但多 Agent 也不是白赚的
-
-拆分以后，新的成本也来了。
-
-## Token 成本
-
-多个 Agent 需要分别理解上下文。
-
----
-
-## 延迟成本
-
-如果：
-
-```text
-Planner
- ↓
-Researcher
- ↓
-Writer
- ↓
-Reviewer
- ↓
-Reviser
-```
-
-是串行的，那么：
-
-```text
-总耗时 ≈ 各阶段耗时之和
-```
-
-所以：
-
-> **多 Agent 并不等于更快。**
-
----
-
-## 失败传播
-
-例如：
-
-```text
-Researcher 查错资料
-       ↓
-Writer 基于错误资料写
-       ↓
-Reviewer 审查错误内容
-       ↓
-最终结果全部建立在错误基础上
-```
-
-所以多 Agent 以后，还必须考虑：
-
-> 错误在哪里发生？怎么发现？失败之后去哪？
-
----
-
-## 编排复杂度
-
-以前只有：
-
-```text
-Agent
-```
-
-现在变成：
-
-```text
-Supervisor
- ├── Planner
- ├── Researcher
- ├── Writer
- ├── Reviewer
- └── Reviser
-```
-
-于是多了很多系统问题：
-
-```text
-谁决定下一步？
-谁拥有工具？
-谁拥有写权限？
-失败之后去哪？
-什么时候停止？
-怎么避免死循环？
-```
-
-所以：
-
-> **多 Agent 的收益必须大于编排成本。**
-
----
-
-# 九、什么时候应该拆 Agent？
-
-今天一个非常重要的判断原则：
-
-> **看专业边界，不要只看步骤数量。**
-
-例如：
-
-### “解释一段代码”
-
-虽然可以拆成：
-
-```text
-阅读
- ↓
-分析
- ↓
-总结
-```
-
-但这些仍属于同一个专业：
-
-> 代码理解。
-
-所以没有必要为了“步骤多”就拆。
-
----
-
-### “写一篇技术调研”
-
-如果过程是：
-
-```text
-查资料
- ↓
-写作
- ↓
-独立审查
-```
-
-这里已经出现三个不同专业角色：
-
-```text
-Research
-Writing
-Review
-```
-
-而且它们还可以拥有不同工具和不同验收标准。
-
-因此拆分就有价值。
-
----
-
-# 十、Supervisor 的核心其实只有一句话
-
-> **Supervisor 决定下一步由谁执行。**
-
-例如：
-
-```text
-                   Supervisor
-                       │
-             决定下一步交给谁
-                       │
-        ┌──────────────┼──────────────┐
-        ↓              ↓              ↓
-    Researcher       Writer        Reviewer
-        │              │              │
-        └──────────────┼──────────────┘
-                       ↓
-                  回 Supervisor
-```
-
-这里 Supervisor 自己并不负责：
-
-```text
-搜索资料
-写文章
-审文章
-```
-
-它负责：
-
-> **调度。**
-
-因此可以继续用之前的类比：
-
-### Supervisor = 医院分诊台
-
-```text
-病人
- ↓
-分诊台
- ↓
-决定去哪个科室
- ↓
-专科医生处理
- ↓
-结果返回
- ↓
-继续判断是否需要其他科室
-```
-
-分诊台不是医生。
-
-Supervisor 也不是具体 Worker。
-
----
-
-# 十一、Supervisor 有四个必须回答的问题
-
-## ① 谁决策？
-
-只有 Supervisor 决定下一步。
-
-Worker 负责：
-
-```text
-执行
-返回结果
-```
-
-而不是：
-
-```text
-直接控制整个流程
-```
-
-如果 Worker 开始自己决定：
-
-```text
-Researcher → Writer
-Writer → Reviewer
-Reviewer → Reviser
-```
-
-那么系统就开始往另一种架构移动。
-
----
-
-# 十二、② 专业边界是什么？
-
-每个 Worker 应该有：
-
-```text
-一个核心职责
-+
-明确目标
-+
-角色约束
-+
-自己的工具集合
-```
-
-例如：
-
-| Worker     | 核心职责 |
-| ---------- | ---- |
-| Planner    | 拆任务  |
-| Researcher | 查资料  |
-| Writer     | 写作   |
-| Reviewer   | 找问题  |
-| Reviser    | 修改   |
-
-这里真正重要的是：
-
-> **角色不仅靠 Prompt 区分，也靠工具和权限区分。**
-
-例如：
-
-```text
-Researcher
-  ├── Search
-  ├── Retrieval
-  └── 文件读取
-
-Writer
-  └── 没有搜索工具
-```
-
-这样角色边界就不只是：
-
-> “Prompt 里告诉你是 researcher。”
-
-而是：
-
-> **系统能力本身也限制了你是什么角色。**
-
----
-
-# 十三、③ Agent 之间怎么通信？
-
-可以先分成三种。
-
-## 1. 共享 State
-
-多个节点围绕同一个 State 工作：
-
-```text
-State
- ├── messages
- ├── 当前任务
- ├── 中间结果
- └── 路由信息
-```
-
-Worker：
-
-```text
-读取 State
- ↓
-处理
- ↓
-返回 State 更新
-```
-
----
-
-## 2. 带名字的消息
-
-例如：
-
-```text
-Researcher：
-“这是研究结果”
-
-Reviewer：
-“这是审查意见”
-```
-
-这样系统能知道：
-
-> **这条信息是谁产生的。**
-
-这个信息对调试特别重要。
-
----
-
-## 3. Send 动态分发
-
-这个是 W6 学过的：
-
-```text
-一个任务
- ↓
-动态拆成 N 份
- ↓
-并行执行
- ↓
-汇合
-```
-
-这里最重要的是：
-
-> **Send 和 Supervisor 虽然都会“动态派任务”，但解决的是不同问题。**
-
----
-
-# 十四、Send 和 Supervisor：为什么这么容易混？
-
-可以这样记：
-
-### Send
-
-> **一次性派活。**
-
-例如：
-
-```text
-5 个数据源
- ↓
-Send
- ↓
-A B C D E
- ↓
-Join
-```
-
-任务开始的时候就知道：
-
-> 这 5 个都要做。
-
----
-
-### Supervisor
-
-> **每一步重新决定。**
-
-例如：
-
-```text
-Research
- ↓
-Writer
- ↓
-Reviewer
- ↓
-不通过？
- ↓
-Reviser
- ↓
-Reviewer
- ↓
-通过？
- ↓
+supervisor
+    ↓
+writer
+    ↓
+supervisor
+    ↓
+reviewer
+    ↓
+supervisor
+    ↓
 FINISH
+    ↓
+END
 ```
 
-所以：
-
-```text
-Send：
-动态扇出
-
-Supervisor：
-动态路由
-```
-
-最简单的理解：
-
-> **Send 是“派完就汇合”；Supervisor 是“干完以后再决定下一步”。**
+Worker 干完以后必须重新回到 Supervisor。
 
 ---
 
-# 十五、所以“多 Agent”和“并行”不是一回事
+# 一、先看今天的 State
 
-这是今天需要彻底区分的一点。
+今天的 State：
 
-```text
-多 Agent
-=
-分工
-
-并行
-=
-执行方式
+```python
+class SuperState(MessagesState):
+    next: str
+    rounds: int
 ```
 
-因此：
+在 `MessagesState` 自带的 `messages` 之外，又增加两个字段：
 
 ```text
-多 Agent 可以串行
-
-多 Agent 也可以结合 Send 做并行
+messages → 工作内容和历史
+next     → Supervisor 的下一步决策
+rounds   → 已经循环多少次
 ```
+
+这三个字段的职责并不一样。
+
+### messages：数据流
+
+它保存整个任务的上下文。
 
 例如：
 
 ```text
-Supervisor
- ↓
-Researcher
- ↓
-Writer
- ↓
-Reviewer
+用户：写一篇 LangGraph 介绍
+
+researcher：
+LangGraph 是……
+
+writer：
+LangGraph 是一个……
 ```
 
-这是多 Agent，但完全可以串行。
+Worker 每次都是从这里读取前面的工作结果。
 
-而：
-
-```text
-Researcher
- ├── Source A
- ├── Source B
- ├── Source C
- └── Source D
-```
-
-这是可以并行的任务。
-
-所以：
-
-> **不要因为看到多个 Agent，就自动想到“并行”。**
-
----
-
-# 十六、Control Flow 和 Data Flow
-
-这是今天继续往深处理解 LangGraph 时非常重要的一层。
-
-## Control Flow：控制流
-
-回答：
-
-> **下一步去哪？**
+### next：控制流
 
 例如：
 
+```python
+next = "writer"
+```
+
+表示：
+
+> 下一步执行 writer。
+
+所以 `next` 是给图的控制逻辑看的，而不是业务内容。
+
+### rounds：安全控制
+
+Supervisor 是循环：
+
 ```text
+Supervisor → Worker → Supervisor → Worker → ...
+```
+
+所以必须记录轮数，防止模型一直循环。
+
+---
+
+# 二、为什么要有两个 LLM 变量
+
+代码：
+
+```python
+llm = make_llm()
+router_llm = make_llm()
+```
+
+当前它们使用的是同一个模型，但职责不同：
+
+```text
+llm
+ ↓
+Worker
+ ↓
+真正干活
+
+
+router_llm
+ ↓
 Supervisor
  ↓
-Researcher
+决定下一步
+```
+
+Worker 的任务是：
+
+```text
+查资料 / 写文章 / 审稿
+```
+
+Supervisor 的任务是：
+
+```text
+现在应该找谁？
+```
+
+虽然都是 LLM，但从系统设计上已经是两个不同角色。
+
+---
+
+# 三、MEMBERS：为什么专门维护一个名单
+
+```python
+MEMBERS = [
+    "researcher",
+    "writer",
+    "reviewer"
+]
+```
+
+这个列表相当于 Supervisor 的“花名册”。
+
+后面很多代码都依赖它：
+
+```text
+Supervisor 能选择谁
+        ↓
+条件边能连接到谁
+        ↓
+Worker 的名字是否合法
+        ↓
+Worker 回边连接给谁
+```
+
+所以它最好成为：
+
+> **单一事实来源。**
+
+以后增加：
+
+```python
+"fact_checker"
+```
+
+就应该优先改这里，而不是到程序各处手写名字。
+
+---
+
+# 四、Route：Supervisor 怎么把“思考结果”交给程序
+
+接下来：
+
+```python
+class Route(BaseModel):
+    next: Literal[
+        "researcher",
+        "writer",
+        "reviewer",
+        "FINISH"
+    ]
+
+    reason: str = Field(
+        default="",
+        description="一句话理由, 方便调试"
+    )
+```
+
+这里解决的是一个核心问题：
+
+> **模型说完“下一步该谁”以后，程序怎么可靠地拿到这个答案？**
+
+不能让模型随便返回一句：
+
+```text
+我觉得现在应该让 writer 处理一下……
+```
+
+而是约束成：
+
+```json
+{
+    "next": "writer",
+    "reason": "researcher 已经完成资料整理"
+}
+```
+
+其中真正影响图运行的是：
+
+```python
+decision.next
+```
+
+而 `reason` 主要用于调试。
+
+因此这里形成了一条链：
+
+```text
+LLM
  ↓
-Supervisor
+结构化输出
  ↓
-Writer
+Route
+ ↓
+decision.next
+ ↓
+State["next"]
+ ↓
+条件边
+ ↓
+真正执行哪个节点
+```
+
+---
+
+# 五、为什么最后用 `json_mode`
+
+最开始写：
+
+```python
+router_llm.with_structured_output(Route)
+```
+
+但实际跑 DeepSeek 时，默认路径触发了 `json_schema`，返回：
+
+```text
+This response_format type is unavailable now
+```
+
+后来又试了：
+
+```python
+method="function_calling"
+```
+
+结果变成：
+
+```text
+Thinking mode does not support this tool_choice
+```
+
+最后通过探针验证，当前环境真正可用的是：
+
+```python
+router = router_llm.with_structured_output(
+    Route,
+    method="json_mode"
+)
+```
+
+所以今天这里真正学到的并不是“DeepSeek 不支持结构化输出”。
+
+而是：
+
+> **同一个结构化输出接口，底层可能走完全不同的协议路径。**
+
+可以画成：
+
+```text
+with_structured_output
+        │
+        ├── json_schema
+        │      ↓
+        │    当前环境不支持
+        │
+        ├── function_calling
+        │      ↓
+        │    thinking mode 拒绝 tool_choice
+        │
+        └── json_mode
+               ↓
+             可用
+```
+
+所以以后遇到这类兼容问题，先写一个最小 Probe，确认**模型实际支持什么**，不要凭印象猜。
+
+---
+
+# 六、Worker 为什么用工厂函数创建
+
+这部分源码初看有一点绕：
+
+```python
+def make_worker(name, tools, prompt):
+    agent = create_react_agent(
+        llm,
+        tools,
+        prompt=prompt
+    )
+
+    def node(state):
+        ...
+```
+
+它其实是在做一件事：
+
+> **把“创建 Worker”这件事封装成一个模板。**
+
+然后：
+
+```python
+worker_nodes = {
+    "researcher": make_worker(
+        "researcher",
+        [web_search],
+        WORKER_PROMPTS["researcher"]
+    ),
+
+    "writer": make_worker(
+        "writer",
+        [],
+        WORKER_PROMPTS["writer"]
+    ),
+
+    "reviewer": make_worker(
+        "reviewer",
+        [],
+        WORKER_PROMPTS["reviewer"]
+    ),
+}
+```
+
+最终得到三个不同的 Worker：
+
+```text
+researcher
+writer
+reviewer
+```
+
+它们本质上结构类似，只是：
+
+```text
+名字不同
+Prompt 不同
+工具不同
+```
+
+所以这里的工厂函数主要是为了：
+
+> **避免重复写三遍几乎一样的 Worker 创建代码。**
+
+---
+
+# 七、三个 Worker 为什么职责不同
+
+Prompt：
+
+```python
+WORKER_PROMPTS = {
+    "researcher": "你是研究员……",
+    "writer": "你是写手……",
+    "reviewer": "你是审稿人……",
+}
+```
+
+工具：
+
+```text
+researcher → web_search
+writer     → 无工具
+reviewer   → 无工具
+```
+
+于是职责就很清楚：
+
+```text
+researcher
+    ↓
+产生资料
+
+writer
+    ↓
+消费资料，产生文章
+
+reviewer
+    ↓
+消费文章，产生审稿结果
+```
+
+这里实际上已经有一个很清楚的数据加工链：
+
+```text
+原始任务
+   ↓
+资料
+   ↓
+文章
+   ↓
+评审结果
+```
+
+Supervisor 只是负责控制这个加工链什么时候进入下一阶段。
+
+---
+
+# 八、真正执行 Worker 时，State 是怎么进去的
+
+Worker 的核心代码：
+
+```python
+result = agent.invoke({
+    "messages": state["messages"]
+})
+```
+
+这里特别容易误解。
+
+它不是：
+
+```text
+把整个 LangGraph State 原封不动塞给 Agent
+```
+
+而是：
+
+```text
+LangGraph State
+      │
+      └── state["messages"]
+                 ↓
+            Worker Agent
+```
+
+所以 Worker 真正拿到的核心数据是：
+
+> **当前 State 中的消息历史。**
+
+如果此时 State 是：
+
+```text
+messages:
+    用户要求
+    researcher 结果
+```
+
+那么 writer 就可以根据这些内容继续工作。
+
+---
+
+# 九、Worker 干完以后为什么还要重新包装一次消息
+
+Worker 内部 Agent 最后得到：
+
+```python
+last = result["messages"][-1]
+text = str(last.content)
+```
+
+接着：
+
+```python
+return {
+    "messages": [
+        HumanMessage(
+            content=f"[{name} 交活]\n{text}",
+            name=name
+        )
+    ]
+}
+```
+
+这一步非常重要。
+
+因为 Worker 内部的最终结果不能只停留在它自己的 Agent 里。
+
+它必须进入 LangGraph 的 State。
+
+于是：
+
+```text
+Worker 内部
+    ↓
+生成结果
+    ↓
+包装为 HumanMessage
+    ↓
+写回 State.messages
+```
+
+同时增加：
+
+```python
+name=name
+```
+
+于是 Supervisor 下一轮就知道：
+
+```text
+这是 researcher 交来的
+```
+
+而不是只能看到一条匿名消息。
+
+---
+
+# 十、这里可以第一次把“逻辑流”和“数据流”放在一起看
+
+现在完整看一次 researcher：
+
+### 逻辑流
+
+```text
+supervisor
+    ↓
+decision.next = researcher
+    ↓
+条件边
+    ↓
+researcher
 ```
 
 这是：
 
-```text
-谁执行？
-什么时候执行？
-下一步去哪？
-```
+> **决定谁执行。**
 
----
-
-## Data Flow：数据流
-
-回答：
-
-> **信息怎么流？**
-
-例如：
+### 数据流
 
 ```text
-Researcher
- ↓
+State.messages
+    ↓
+researcher Agent
+    ↓
+web_search
+    ↓
 研究结果
- ↓
-State
- ↓
-Writer
- ↓
-初稿
- ↓
-State
- ↓
-Reviewer
+    ↓
+HumanMessage(name="researcher")
+    ↓
+写回 State.messages
 ```
 
-所以：
+这是：
+
+> **决定执行时拿什么，执行后留下什么。**
+
+两条流最后重新汇合：
 
 ```text
-Control Flow = 路怎么走
-
-Data Flow = 东西怎么传
+                     State
+                ┌───────────────┐
+                │ messages      │
+                │ next          │
+                │ rounds        │
+                └───────┬───────┘
+                        │
+            ┌───────────▼───────────┐
+            │      supervisor       │
+            │       决定 next       │
+            └───────────┬───────────┘
+                        │
+                     控制流
+                        │
+                        ▼
+                      Worker
+                        │
+                     数据流
+                        │
+                        ▼
+                  写回 messages
+                        │
+                        └────→ supervisor
 ```
 
-以后看复杂 LangGraph 时，不能只看：
-
-> “节点怎么连。”
-
-还要同时看：
-
-> **控制流怎么走？数据流怎么走？**
+这是今天我认为理解 Supervisor 最重要的一张图。
 
 ---
 
-# 十七、为什么“有 State”还不等于“有 Agent”？
+# 十一、Supervisor 节点到底在做什么
 
-这和刚才的 Tool / Worker 区别可以连起来理解。
+源码核心：
 
-一个 Tool 完全可以有自己的状态：
+```python
+def supervisor_node(state):
+    rounds = state.get("rounds", 0) + 1
 
-```text
-Tool
- └── Buffer
+    if rounds > MAX_ROUNDS:
+        return {
+            "next": "FINISH",
+            "rounds": rounds,
+            ...
+        }
+
+    msgs = [
+        SystemMessage(
+            content=SUPERVISOR_PROMPT
+        )
+    ] + state["messages"]
+
+    decision = router.invoke(msgs)
+
+    return {
+        "next": decision.next,
+        "rounds": rounds,
+    }
 ```
 
-但它仍然可能只是：
+可以拆成四步。
 
-```text
-输入
- ↓
-固定执行
- ↓
-输出
+### 第一步：计算轮数
+
+```python
+rounds += 1
 ```
 
-Agent 的区别在于：
+### 第二步：检查是否超限
+
+如果已经超限：
 
 ```text
-State
-+
-目标
-+
-决策
-+
-行动
-+
-控制循环
+直接 FINISH
 ```
 
-所以可以记：
+连 LLM 都不再调用。
 
-> **State 是基础，但自治能力才是 Agent 与普通工具进一步拉开差异的地方。**
+这是为了避免已经知道要结束了，还白花一轮模型费用。
+
+### 第三步：把“Supervisor 的规则 + 当前消息历史”交给 LLM
+
+```python
+msgs = [
+    SystemMessage(content=SUPERVISOR_PROMPT)
+] + state["messages"]
+```
+
+模型看到：
+
+```text
+自己的职责
++
+前面的工作历史
+```
+
+### 第四步：把模型决定写回 State
+
+```python
+return {
+    "next": decision.next,
+    "rounds": rounds,
+}
+```
+
+所以 Supervisor 这一轮的作用其实非常简单：
+
+> **读取 State → 决定下一步 → 修改 State。**
 
 ---
 
-# 十八、Supervisor、Worker、Tool 的层级关系
+# 十二、条件边：模型只负责“说去哪”，图负责“真的去”
 
-现在可以把前面的内容组合起来：
+路由函数：
 
-```text
-                    Supervisor
-                         │
-                  决定调用谁
-                         │
-          ┌──────────────┼──────────────┐
-          ↓              ↓              ↓
-      Researcher       Writer        Reviewer
-          │
-          ↓
-        Agent
-      ┌────┼────┐
-      ↓    ↓    ↓
-   Search  DB  Retrieval
-      │    │     │
-      └────┴─────┘
-         Tools
+```python
+def route_from_supervisor(state):
+    nxt = state.get("next") or "FINISH"
+
+    return (
+        nxt
+        if nxt in MEMBERS or nxt == "FINISH"
+        else "FINISH"
+    )
 ```
 
-从上往下：
+然后：
 
-```text
-Supervisor
-    ↓
-调度 Worker
-
-Worker
-    ↓
-自己完成专业任务
-
-Agent
-    ↓
-做内部决策
-
-Tool
-    ↓
-提供具体能力
+```python
+builder.add_conditional_edges(
+    "supervisor",
+    route_from_supervisor,
+    path_map
+)
 ```
 
-因此：
+完整过程其实是：
 
-> **Supervisor 调的是“更大的能力单元”。**
+```text
+Supervisor LLM
+       ↓
+"writer"
+       ↓
+state["next"]
+       ↓
+route_from_supervisor()
+       ↓
+"writer"
+       ↓
+path_map
+       ↓
+writer 节点
+```
+
+所以一个非常值得记住的边界是：
+
+> **LLM 做决策，Graph 执行决策。**
+
+模型不是直接调用：
+
+```python
+writer()
+```
+
+它只是在 State 中留下：
+
+```text
+next = "writer"
+```
+
+然后 LangGraph 根据图结构真正执行 writer。
 
 ---
 
-# 十九、这让我重新理解“Agent 可以当成 Tool”
+# 十三、为什么 Worker 必须回 Supervisor
 
-这个想法其实非常重要。
+这里：
 
-对于 Supervisor 来说：
-
-```text
-Researcher
+```python
+for name in MEMBERS:
+    builder.add_edge(
+        name,
+        "supervisor"
+    )
 ```
 
-可以被看成一个能力：
+实际上是整个模式的循环核心。
 
-> “帮我完成研究。”
-
-所以 Supervisor 看：
+形成：
 
 ```text
-Researcher ≈ 一个高级 Tool
+researcher ─┐
+writer     ─┼──→ supervisor
+reviewer   ─┘
 ```
 
-但对于 Researcher 自己：
+如果没有这组回边：
 
 ```text
-Researcher
- ↓
-LLM
- ↓
-Search Tool
- ↓
-Retrieval Tool
- ↓
-内部 State
- ↓
-循环
+supervisor
+    ↓
+researcher
+    ↓
+结束
 ```
 
-它又是一个完整 Agent。
+那么 Worker 做完以后，就没有人继续判断下一步。
+
+所以 Supervisor 模式真正的图形是：
+
+```text
+Supervisor → Worker
+      ↑        │
+      └────────┘
+```
+
+直到：
+
+```text
+Supervisor → FINISH → END
+```
+
+---
+
+# 十四、把一次完整运行串起来
+
+现在假设模型做出了一个比较理想的路径：
+
+```text
+supervisor
+→ researcher
+→ supervisor
+→ writer
+→ supervisor
+→ reviewer
+→ supervisor
+→ FINISH
+```
+
+状态变化可以粗略理解为：
+
+### 初始
+
+```text
+messages:
+    用户要求
+
+next:
+    ""
+
+rounds:
+    0
+```
+
+### Supervisor 第一次
+
+```text
+next = researcher
+rounds = 1
+```
+
+### researcher 执行
+
+```text
+messages:
+    用户要求
+    researcher 交活
+```
+
+### Supervisor 第二次
+
+读取：
+
+```text
+用户要求
+researcher 结果
+```
+
+决定：
+
+```text
+next = writer
+rounds = 2
+```
+
+### writer 执行
+
+```text
+messages:
+    用户要求
+    researcher 结果
+    writer 文章
+```
+
+### Supervisor 第三次
+
+决定：
+
+```text
+next = reviewer
+rounds = 3
+```
+
+### reviewer 执行
+
+```text
+messages:
+    用户要求
+    researcher 结果
+    writer 文章
+    reviewer 意见
+```
+
+### Supervisor 最后决定
+
+```text
+next = FINISH
+```
 
 于是：
 
-> **一个组件是不是 Tool 或 Agent，有时候取决于你站在哪一层看它。**
-
-从上层看：
-
 ```text
-Worker = 能力模块
+FINISH
+  ↓
+END
 ```
 
-从 Worker 自己看：
+整个过程中：
 
 ```text
-Worker = Agent
+messages
 ```
 
-这就是层级化 Agent 的感觉。
+越来越丰富。
+
+而：
+
+```text
+next
+```
+
+负责控制当前应该去哪。
+
+这就是今天最核心的：
+
+> **数据流在 State 中积累，控制流围绕 State 动态前进。**
 
 ---
 
-# 二十、④ 系统怎么停？
+# 十五、为什么要加 MAX_ROUNDS
 
-Supervisor 最容易出现的问题之一就是：
+Supervisor 本质上是动态循环。
+
+例如 reviewer 可能说：
 
 ```text
-Supervisor
+文章需要修改
+```
+
+于是：
+
+```text
+reviewer
  ↓
-Worker
+writer
  ↓
-Supervisor
+reviewer
  ↓
-Worker
+writer
  ↓
+reviewer
 ……
 ```
 
-如果没有停止机制：
-
-> 就可能形成死循环。
-
-因此要有至少三层防线。
-
----
-
-## 第一层：语义结束
-
-例如：
-
-```text
-FINISH
-```
-
-意思是：
-
-> 模型认为任务完成。
-
-但这是 LLM 判断。
+如果没有限制，模型可以一直绕下去。
 
 所以：
 
-> 它会飘。
+```python
+MAX_ROUNDS = 8
+```
+
+相当于：
+
+> **给模型的自主决策设置一道硬上限。**
+
+而且今天特意做了 fallback 模式：
+
+```text
+MAX_ROUNDS = 1
+```
+
+让流程进入：
+
+```text
+supervisor
+→ researcher
+→ supervisor
+→ 强制 FINISH
+```
+
+这样才能真正证明兜底逻辑生效，而不是只看代码说“应该能生效”。
 
 ---
 
-## 第二层：质量门槛
+# 十六、今天的一个重要调试经验：两次运行不能拿来互相证明
 
-例如：
-
-```text
-Reviewer
- ↓
-评分
- ↓
-通过？
-```
-
-通过：
+之前的思路是：
 
 ```text
-FINISH
+stream()
+    ↓
+拿流转链
+
+invoke()
+    ↓
+拿最终 State
 ```
 
-不通过：
+然后：
 
 ```text
-Reviser
+第一次：4 轮
+第二次：6 轮
 ```
 
-这比完全依赖 Supervisor 的主观判断更好。
+再拿两者比较。
 
-但：
+问题是：
 
-> 它仍然是模型判断。
+> **它们根本不是同一次运行。**
+
+LLM 是动态的，所以即使：
+
+```text
+temperature = 0
+```
+
+也不能把两个独立运行当成同一个实验。
+
+最后改成：
+
+```python
+for mode, chunk in graph.stream(
+    INITIAL,
+    stream_mode=["updates", "values"]
+):
+```
+
+于是一次运行同时得到：
+
+```text
+updates → 流程链
+values  → State 快照
+```
+
+这样才能比较：
+
+```text
+这一次运行到底发生了什么。
+```
+
+这个思路其实比 Supervisor 本身还通用：
+
+> **验证动态系统时，尽量让观察数据来自同一次实验。**
 
 ---
 
-## 第三层：确定性硬上限
+# 十七、今天还有一个特别隐蔽的测试坑：空集合
 
-例如：
+比如：
 
-```text
-MAX_ROUNDS
+```python
+for m in delivered:
+    assert m.name in MEMBERS
 ```
 
-无论模型怎么判断：
+如果：
 
-> 到达最大轮数，必须停止。
-
-所以：
-
-```text
-语义停止
-+
-质量停止
-+
-硬停止
+```python
+delivered = []
 ```
 
-这才是比较完整的停止设计。
+那么：
+
+```text
+循环执行 0 次
+↓
+assert 执行 0 次
+↓
+程序不报错
+```
+
+于是你会产生一种错觉：
+
+> “检查通过了。”
+
+实际上：
+
+> **根本没有检查。**
+
+所以正确做法是：
+
+```python
+assert delivered
+
+for m in delivered:
+    assert m.name in MEMBERS
+```
+
+先证明：
+
+```text
+确实存在需要验证的数据
+```
+
+再检查数据是否合法。
+
+这就是今天说的“真空真”。
 
 ---
 
-# 二十一、为什么硬上限特别重要？
+# 十八、验证器也可能看错地方
+
+今天还有一个反例。
+
+原本检测工具是否真的被调用，写成：
+
+```python
+called = any(
+    "真身被调用" in str(m.content)
+    for m in out["messages"]
+)
+```
+
+结果：
+
+```text
+❌ 工具没有调用
+```
+
+但实际上工具真的调用了。
 
 因为：
 
-```text
-FINISH
+```python
+print(...)
 ```
 
-是模型判断。
+走的是：
 
 ```text
-Reviewer >= 7
+stdout
 ```
 
-也是模型判断。
+而：
 
-只有：
+```python
+return ...
+```
+
+才会进入：
 
 ```text
-MAX_ROUNDS = N
+ToolMessage
 ```
 
-这种机制是确定性的。
+也就是：
 
-所以：
+```text
+print
+ ↓
+终端
 
-> **不要把“模型应该会停”当作系统一定会停。**
+return
+ ↓
+ToolMessage
+ ↓
+State.messages
+```
 
-以后设计 Agent Loop 时，都应该问一句：
+这是两条完全不同的数据通道。
 
-> “如果模型判断错了，我的系统还能不能强制停下来？”
+所以后面才改成：
+
+```text
+CALLS
++
+ToolMessage
+```
+
+两个证据一起看。
+
+这个例子让我今天对测试又多了一层认识：
+
+> **验证器本身也必须建立在正确的数据通道上。**
 
 ---
 
-# 二十二、Worker 的权限为什么也是系统设计的一部分？
+# 十九、今天最终形成的理解
 
-因为：
+以前看到这种代码，容易先被很多 API 吓到：
 
-> **能做什么和负责什么，是两个不同的问题。**
-
-例如：
-
-```text
-Publisher
+```python
+StateGraph
+add_node
+add_edge
+add_conditional_edges
+with_structured_output
+create_react_agent
+HumanMessage
+MessagesState
 ```
 
-负责发布内容。
-
-但不一定意味着：
+但今天把它还原成系统以后，其实就是：
 
 ```text
-Publisher
-=
-自动拥有发布权限
+                 State
+        ┌──────────┼──────────┐
+        │          │          │
+    messages      next      rounds
+        │          │          │
+        │          │          │
+        ▼          ▼          ▼
+     数据流     控制流      安全控制
+        │          │
+        └────┬─────┘
+             ▼
+        Supervisor
+             │
+          决定 next
+             │
+             ▼
+          条件边
+             │
+             ▼
+           Worker
+             │
+          干自己的活
+             │
+             ▼
+      结果重新写入 State
+             │
+             └────→ Supervisor
 ```
 
-如果操作会产生副作用：
+所以今天我真正理解的，不只是：
 
-```text
-写文件
-修改数据库
-调用外部 API
-发送消息
-删除内容
-发布结果
-```
-
-可以设计：
-
-```text
-Worker
- ↓
-Permission / Approval Gate
- ↓
-允许 / 拒绝
-```
-
-所以：
-
-```text
-Role Boundary
-=
-谁负责什么
-
-Permission Boundary
-=
-谁有资格真的做什么
-```
-
-这两个边界不能混成一个。
-
----
-
-# 二十三、失败路径也必须设计
-
-一个完整的多 Agent 系统不能只考虑：
-
-```text
-成功
-```
-
-还要考虑：
-
-```text
-失败
-部分成功
-超时
-工具失败
-结果无效
-重复失败
-```
-
-例如：
-
-```text
-Researcher
- ↓
-Search 失败
-```
-
-系统可以：
-
-```text
-失败
- ↓
-重试
-```
-
-也可以：
-
-```text
-失败
- ↓
-换工具
-```
-
-或者：
-
-```text
-失败
- ↓
-回 Supervisor
- ↓
-重新派任务
-```
-
-再或者：
-
-```text
-失败次数超过上限
- ↓
-终止
-```
-
-所以 Worker 的设计不仅是：
-
-> “它成功以后返回什么？”
-
-还要问：
-
-> **“它失败以后返回什么？”**
-
----
-
-# 二十四、Supervisor 系统的完整骨架
-
-把今天所有知识合起来，可以得到：
-
-```text
-                    ┌────────────────┐
-                    │   Supervisor   │
-                    │  决定 next      │
-                    └───────┬────────┘
-                            ↓
-              ┌─────────────┼─────────────┐
-              ↓             ↓             ↓
-         Researcher       Writer       Reviewer
-              │
-              ↓
-         内部 Agent
-              │
-       ┌──────┼──────┐
-       ↓      ↓      ↓
-    Search    DB   Retrieval
-       │      │      │
-       └──────┴──────┘
-             Tools
-
-所有 Worker
-      ↓
-    State
-      ↓
-回 Supervisor
-      ↓
-┌──────────────────────────┐
-│ 成功？                    │
-│ 质量达标？                │
-│ 超过最大轮数？            │
-│ 失败是否需要重试？        │
-└───────────┬──────────────┘
-            ↓
-       FINISH / 下一轮
-```
-
-这个图里其实已经包含了今天绝大多数知识。
-
----
-
-# 二十五、以后判断一个多 Agent 系统，可以问这 8 个问题
-
-以后看到一个新架构，我不应该先问：
-
-> “这里用了几个 Agent？”
-
-而应该按这个顺序问：
-
-```text
-1. 为什么需要拆？
-2. 每个 Worker 的专业边界是什么？
-3. 每个 Worker 有什么工具？
-4. State 在哪里？
-5. Control Flow 怎么走？
-6. Data Flow 怎么走？
-7. 哪些动作需要权限 / 审批？
-8. 系统怎么停止、失败怎么办？
-```
-
-如果这 8 个问题都能回答：
-
-> 这个系统的基本架构就已经开始真正理解了。
-
----
-
-# 二十六、Supervisor 和 Swarm
-
-最后再区分一个容易混淆的概念。
-
-## Supervisor
-
-```text
-Supervisor
-   ↓
-Worker
-   ↓
-Supervisor
-   ↓
-Worker
-```
-
-核心：
-
-> **中央调度。**
-
----
-
-## Swarm
-
-更接近：
-
-```text
-Agent A
- ↓
-Agent B
- ↓
-Agent C
- ↓
-Agent A
-```
-
-每个 Agent 都可能参与决定下一步。
-
-因此两者真正的核心差别就是：
-
-> **谁决定下一步。**
-
-可以记成：
-
-```text
-Supervisor = 中央决策
-
-Swarm = 对等协作
-```
-
----
-
-# 二十七、今天我真正理解到的东西
-
-今天原本以为要学习：
-
-> “Supervisor 怎么写。”
-
-但真正理解以后，发现它其实和我之前学的东西串起来了。
-
-以前：
-
-```text
-Agent
- ↓
-Tool Routing
- ↓
-选择 Tool
-```
-
-现在：
-
-```text
-Supervisor
- ↓
-Agent Routing
- ↓
-选择 Worker
-```
-
-它们底层的控制思想是相似的。
-
-只是：
-
-```text
-Tool
-=
-具体能力
-
-Worker
-=
-完整的专业执行单元
-```
-
-于是：
-
-```text
-Agent 调 Tool
-```
-
-和：
-
-```text
-Supervisor 调 Worker
-```
-
-其实可以看成**不同层级上的路由**。
-
-这也让我开始理解：
-
-> **复杂 Agent 系统不一定是在增加完全不同的新机制，很多时候是在把以前已经存在的“决策 → 调用 → 返回 → 再决策”这一套机制向更高层次扩展。**
-
----
-
-# 二十八、今天的最终认知图
-
-最后把今天压缩成一张图：
-
-```text
-                    任务
-                      │
-                      ↓
-              是否需要拆分？
-                      │
-             ┌────────┴────────┐
-             ↓                 ↓
-           不需要             需要
-             ↓                 ↓
-          单 Agent         专业角色拆分
-                               │
-                               ↓
-                         Supervisor
-                               │
-                        决定下一步
-                               │
-            ┌──────────────────┼──────────────────┐
-            ↓                  ↓                  ↓
-        Researcher          Writer            Reviewer
-            │
-            ↓
-         Agent
-            │
-       ┌────┼────┐
-       ↓    ↓    ↓
-     Tool  Tool  Tool
-       
-        
-Control Flow：
-谁 → 谁
-
-Data Flow：
-数据 → 哪里
-
-Permission：
-谁 → 有资格做什么
-
-Termination：
-什么时候必须停
-
-Failure：
-出了问题怎么办
-```
-
----
-
-# 二十九、最后一句话
-
-> **多 Agent 的本质不是“多几个模型”，而是把一个复杂任务变成多个具有明确职责、工具、状态和权限边界的执行单元，再通过一个控制机制把它们组织起来。**
-
-而 Supervisor 的核心也不是：
-
-> “我有一个主管 Agent。”
+> “Supervisor 可以调度多个 Agent。”
 
 而是：
 
-> **“我把 Agent 本身也变成了可以被上一级系统路由的能力单元。”**
+> **Supervisor 是一个不断读取 State、修改 State，并依据 State 决定下一跳的动态控制器。**
 
-所以今天最值得记住的不是某一个 API，而是这条链：
-
-```text
-Tool Routing
-   ↓
-选择工具
-
-Agent
-   ↓
-内部决定怎么完成任务
-
-Worker
-   ↓
-把一个完整专业任务封装成执行单元
-
-Supervisor Routing
-   ↓
-选择哪个 Agent / Worker 执行
-
-Multi-Agent System
-   ↓
-把这些执行单元组织成一个可控制的系统
-```
-
-而真正工程化以后，还必须继续回答：
+而整个系统可以分成两条主线：
 
 ```text
-状态怎么流
-控制怎么走
-权限怎么控
-失败怎么办
-什么时候停
-成本是否值得
+控制流：
+Supervisor → next → 条件边 → Worker → Supervisor
+
+数据流：
+messages → Worker → 工作结果 → messages
 ```
 
-这才是今天 W7-Day1 真正要建立起来的架构思维。
+这两条流最后都通过 State 汇合。
+
+以后再看类似的多 Agent 代码，我觉得可以先问自己两个问题：
+
+> **第一：谁决定下一步？**
+
+> **第二：上一阶段产生的数据，是通过什么字段传给下一阶段的？**
+
+先找到这两个答案，源码就不会再是一堆孤立的 API。
+
+---
+
+# 完整 Demo
+
+下面保留今天最终版本的核心代码。
+
+为了方便之后复习，完整 Demo 放在文章最后；**省略 import、包安装和断言代码**，正文重点放在运行机制和代码结构。
+
+````python
+MODEL_NAME = "deepseek-chat"
+BASE_URL = "https://api.deepseek.com"
+API_KEY = os.getenv("DEEPSEEK_API_KEY")
+
+MODE = sys.argv[1] if len(sys.argv) > 1 else "normal"
+MAX_ROUNDS = 1 if MODE == "fallback" else 8
+FAULT = os.getenv("FAULT") or None
+
+MEMBERS = [
+    "researcher",
+    "writer",
+    "reviewer"
+]
+
+
+def make_llm(temperature: float = 0):
+    return ChatOpenAI(
+        model=MODEL_NAME,
+        base_url=BASE_URL,
+        api_key=API_KEY,
+        temperature=temperature,
+    )
+
+
+llm = make_llm()
+router_llm = make_llm()
+
+
+class SuperState(MessagesState):
+    next: str
+    rounds: int
+
+
+class Route(BaseModel):
+    next: Literal[
+        "researcher",
+        "writer",
+        "reviewer",
+        "FINISH"
+    ]
+    reason: str = Field(
+        default="",
+        description="一句话理由，方便调试"
+    )
+
+
+router = router_llm.with_structured_output(
+    Route,
+    method="json_mode"
+)
+
+
+@tool
+def web_search(query: str) -> str:
+    print(f">>> [web_search] query={query!r}")
+
+    return (
+        f"[模拟检索结果] 关于「{query}」："
+        "LangGraph 是用于构建有状态多步 Agent 的框架；"
+        "核心包括 StateGraph、条件边和持久化能力。"
+    )
+
+
+WORKER_PROMPTS = {
+    "researcher": (
+        "你是研究员。用 web_search 查资料，"
+        "把关键要点整理成 2-3 条，不要写完整文章。"
+    ),
+
+    "writer": (
+        "你是写手。把对话历史里 researcher "
+        "交的资料整合成一篇 300 字左右的中文文章。"
+        "只写文章，不要写评论或修改意见。"
+    ),
+
+    "reviewer": (
+        "你是审稿人。检查上一位 writer 写的文章，"
+        "指出事实性、结构、表达上的具体问题。"
+        "如果文章已经可以定稿，明确说「可以定稿」。"
+    ),
+}
+
+
+def make_worker(name: str, tools: list, prompt: str):
+    agent = create_react_agent(
+        llm,
+        tools,
+        prompt=prompt
+    )
+
+    def node(state: SuperState) -> dict:
+        result = agent.invoke({
+            "messages": state["messages"]
+        })
+
+        last = result["messages"][-1]
+        text = str(last.content)
+
+        if FAULT == "no_deliver":
+            return {
+                "messages": []
+            }
+
+        msg_name = (
+            None
+            if FAULT == "no_name"
+            else name
+        )
+
+        return {
+            "messages": [
+                HumanMessage(
+                    content=f"[{name} 交活]\n{text}",
+                    name=msg_name
+                )
+            ]
+        }
+
+    node.__name__ = name
+    return node
+
+
+worker_nodes = {
+    "researcher": make_worker(
+        "researcher",
+        [web_search],
+        WORKER_PROMPTS["researcher"]
+    ),
+
+    "writer": make_worker(
+        "writer",
+        [],
+        WORKER_PROMPTS["writer"]
+    ),
+
+    "reviewer": make_worker(
+        "reviewer",
+        [],
+        WORKER_PROMPTS["reviewer"]
+    ),
+}
+
+
+SUPERVISOR_PROMPT = """
+你是写作工作室的主编(supervisor)，手下三位成员：
+
+- researcher：负责查资料，只交资料要点，不写正文
+- writer：负责把资料整合成一篇结构清晰的中文文章
+- reviewer：负责审稿，指出文章的问题
+
+你的职责：每一步只决定“下一步交给谁”。
+不要替任何成员干活，不要自己写文章。
+
+标准流程：
+researcher 拿资料
+→ writer 成稿
+→ reviewer 审稿
+→ 若有重大问题，可以回 writer 修改
+→ 都满意后输出 FINISH
+
+判断依据：
+看历史里带名的交活消息。
+
+已经交过活的不必重复派。
+
+只输出一个 JSON 对象，例如：
+
+{
+    "next": "researcher",
+    "reason": "还没有资料"
+}
+
+next 只能是：
+researcher / writer / reviewer / FINISH
+"""
+
+
+def supervisor_node(state: SuperState) -> dict:
+    rounds = state.get("rounds", 0) + 1
+
+    if rounds > MAX_ROUNDS:
+        return {
+            "next": "FINISH",
+            "rounds": rounds,
+            "messages": [
+                (
+                    "assistant",
+                    f"【已达最大轮数 {MAX_ROUNDS}，强制结束】"
+                )
+            ],
+        }
+
+    msgs = [
+        SystemMessage(
+            content=SUPERVISOR_PROMPT
+        )
+    ] + state["messages"]
+
+    decision = router.invoke(msgs)
+
+    print(
+        f"[supervisor] round={rounds} "
+        f"next={decision.next} "
+        f"({decision.reason})"
+    )
+
+    return {
+        "next": decision.next,
+        "rounds": rounds,
+    }
+
+
+def route_from_supervisor(state: SuperState):
+    nxt = state.get("next") or "FINISH"
+
+    return (
+        nxt
+        if nxt in MEMBERS or nxt == "FINISH"
+        else "FINISH"
+    )
+
+
+def build_graph():
+    builder = StateGraph(SuperState)
+
+    builder.add_node(
+        "supervisor",
+        supervisor_node
+    )
+
+    for name, node in worker_nodes.items():
+        builder.add_node(
+            name,
+            node
+        )
+
+    builder.add_edge(
+        START,
+        "supervisor"
+    )
+
+    path_map = {
+        member: member
+        for member in MEMBERS
+    }
+
+    path_map["FINISH"] = END
+
+    builder.add_conditional_edges(
+        "supervisor",
+        route_from_supervisor,
+        path_map
+    )
+
+    for name in MEMBERS:
+        builder.add_edge(
+            name,
+            "supervisor"
+        )
+
+    return builder.compile()
+
+
+INITIAL = {
+    "messages": [
+        (
+            "user",
+            "写一篇 300 字介绍 LangGraph 的文章，"
+            "要求有事实依据"
+        )
+    ],
+    "next": "",
+    "rounds": 0,
+}
+
+
+def main():
+    graph = build_graph()
+
+    chain = []
+    final_state = None
+
+    for mode, chunk in graph.stream(
+        INITIAL,
+        stream_mode=["updates", "values"]
+    ):
+        if mode == "updates":
+            for node_name in chunk:
+                chain.append(node_name)
+
+        elif mode == "values":
+            final_state = chunk
+
+    out = final_state
+
+    print(
+        "\n[流转链]",
+        " → ".join(chain)
+    )
+
+    print("\n=== 成品 ===")
+    print(
+        str(
+            out["messages"][-1].content
+        )[:400]
+    )
+
+    print(
+        f"[结果] "
+        f"next={out['next']} "
+        f"rounds={out['rounds']}"
+    )
+
+    mermaid = graph.get_graph().draw_mermaid()
+
+    with open(
+        "w7_supervisor_topology.md",
+        "w",
+        encoding="utf-8"
+    ) as f:
+        f.write(
+            "```mermaid\n"
+            + mermaid
+            + "\n```\n"
+        )
+
+
+if __name__ == "__main__":
+    main()
+````
