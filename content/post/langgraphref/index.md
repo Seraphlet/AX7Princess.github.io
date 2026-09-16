@@ -1,13 +1,13 @@
 ---
 description: ""
-title: ""
-draft: true
+title: "反思循环：Critique-Revise，让 Agent 自己检查、修改，再决定要不要继续"
+draft: false
 date: "2026-09-16T14:35:03+08:00"
 slug: "LangGraphref"
 categories:
- - 
+ - LangGraph
 tags:
- - 
+ - Critique-Revise
 image: ""
 ---
 
