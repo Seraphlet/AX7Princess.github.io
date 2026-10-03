@@ -5,7 +5,7 @@ draft: false
 date: "2026-09-27T05:39:46+08:00"
 slug: "Agents"
 categories:
- - Agetns
+ - VibeCoding
 tags:
  - Note
 image: ""
@@ -1085,3 +1085,5 @@ Human Gate
 > **有多少工程决策可以安全地从人的日常控制循环中移出去，同时仍然保持可验证、可追踪、可恢复、可控制。**
 
 这可能才是我目前理解的 AI-Native Software Engineering 的核心。
+
+后续补充：这里讨论的 Human → Agent → State Machine → Graph Runtime，主要描述的是“控制权如何下沉”，也就是系统如何决定下一步应该执行什么。实际运行时还有另一层问题：如果多个 Agent 是彼此独立的 Session，State 即使已经确定 next = Reviewer，也不意味着系统拥有自动唤醒 Reviewer 的能力。这个 Agent Lifecycle / Wake-up 问题并不否定这里的 Runtime 演进，而是后来单独暴露出的执行边界，将在下一篇继续讨论。
