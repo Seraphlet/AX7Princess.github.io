@@ -3,7 +3,7 @@ description: ""
 title: "让 Agent 施工，让 Human 决定怎么走"
 draft: false
 date: "2026-09-30T09:05:24+08:00"
-slug: "VibeCoding"
+slug: "VibeCodingOne"
 categories:
  - VibeCoding
 tags:
