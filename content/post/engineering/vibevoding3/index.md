@@ -3,11 +3,11 @@ description: ""
 title: "Vibe Coding：协作协议不变，执行方式可以不同"
 draft: false
 date: "2026-10-03T09:06:35+08:00"
-slug: "VibeVoding3"
+slug: "VibeCodingThree"
 categories:
- - VibeVoding
-tags:
  - 
+tags:
+ - null
 image: ""
 ---
 
