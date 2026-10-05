@@ -1,1199 +1,1638 @@
 ---
 description: ""
-title: "# 从 Human 到 Runtime：我对 AI Coding 开发方式的一次重新理解"
+title: "让 Agent 施工，让 Human 决定怎么走"
 draft: false
 date: "2026-09-30T09:05:24+08:00"
 slug: "VibeCoding"
 categories:
  - VibeCoding
 tags:
- - 
+ - null
 image: ""
 ---
 
-# 从 Human 到 Runtime：我对 AI Coding 开发方式的一次重新理解
+# 第一次 Vibe Coding：让 Agent 施工，让 Human 决定怎么走
 
-最近做项目时，我越来越明显地感觉到一个问题：
+这是我第一次真正用 Vibe Coding 的方式完成一个项目。
 
-**AI 能写代码，并不等于 AI 已经接管了开发。**
+现在回头看，它的自动化程度并不高。
 
-以前我会把任务交给 AI：
+Agent 每完成一个阶段都会回来问我：
 
-```text
-写代码
-→ 我检查
-→ 跑测试
-→ 我确认
-→ 继续下一步
-→ 再检查
-→ 再确认
-```
+> Plan 可以执行吗？  
+> 要不要运行测试？  
+> 要不要继续修改？  
+> 这个 Task 可以结束吗？  
+> 是否进入下一个 Task？
 
-表面上 AI 在开发，实际上真正维持整个开发流程运行的人还是我。
+后来我又尝试了自治程度更高的开发方式。
 
-什么时候开始下一项任务？
+但我没有因此认为第一种方式已经落后。
 
-测试失败以后怎么办？
+恰恰相反，真正做过更自治的项目以后，我才重新理解它的价值：
 
-要不要重新测试？
+> **Agent 负责提出路径和执行路径，Human 保留在关键分叉点修改路径的权力。**
 
-什么时候全量回归？
+它不是 Autonomous Runtime。
 
-AI 做完以后应该交给谁？
+它更像一种：
 
-这些事情仍然需要我不断做决定。
-
-后来我才意识到：
-
-> **我虽然把 Implementation 交给了 AI，却没有把 Runtime 交出去。**
-
-这让我开始重新思考 AI Coding。
+> **Human-Controlled Interactive Development。**
 
 ---
 
-# 一、第一阶段：Human 本身就是 Runtime
+# 一、最开始的问题不是怎么让 Agent 自治
 
-最开始的开发模式其实非常简单：
-
-```text
-                Human
-                  │
-          ┌───────┴───────┐
-          ▼               ▼
-       Worker          Test / Review
-          │               │
-          └───────┬───────┘
-                  ▼
-                Human
-                  │
-              下一任务
-```
-
-AI 负责执行，但所有状态转换实际上都由人完成。
-
-比如：
+第一次做完整项目以前，我使用 AI 写代码的方式很简单：
 
 ```text
-Worker 写完
+想到一个功能
 ↓
-我判断该测试了
-
-测试失败
+告诉 AI
 ↓
-我判断让 Worker 修改
-
-测试通过
+AI 写代码
 ↓
-我判断可以进入下一任务
+发现问题
+↓
+继续聊天
+↓
+再修改
 ```
 
-所以真正的 Runtime 是：
+小功能没有什么问题。
+
+但项目一旦变大，一个问题很快就会出现：
+
+> 项目到底存在于哪里？
+
+如果产品目标、架构、边界、任务和历史决策全部存在于聊天记录里，那么 AI 每一次工作都依赖当前 Conversation。
+
+于是第一次真正做项目时，我开始把项目从聊天里搬出来。
+
+逐渐形成：
 
 ```text
-Human
+PRODUCT.md
+SYSTEM.md
+DECISIONS.md
+TASKS.md
+BUILD.md
+CHANGELOG.md
 ```
 
-AI 更像 Runtime 调用的一个工具。
-
-这种模式对于小任务没有什么问题。
-
-但项目变大以后，人会逐渐成为瓶颈。
-
-我之前做项目时就遇到了一个明显的问题：
-
-**验收越来越频繁。**
-
-改一点：
+它们分别回答不同的问题：
 
 ```text
-测试
+PRODUCT
+→ 我要解决什么问题？
+
+SYSTEM
+→ 系统准备怎么工作？
+
+DECISIONS
+→ 哪些关键选择已经确定？
+
+TASKS
+→ 接下来需要完成什么？
+
+BUILD
+→ Human 和 AI 怎么一起施工？
+
+CHANGELOG
+→ 项目实际上发生了什么？
 ```
 
-再改一点：
+从这里开始：
 
-```text
-再测试
-```
+> **聊天不再是项目本身。**
 
-完成一个小模块：
-
-```text
-全量测试
-```
-
-然后继续下一步。
-
-最终大量时间和资源消耗在重复验收上。
-
-更重要的是，我始终被绑在开发循环里面。
-
-AI 并没有真正接管项目。
+真正的 Source of Truth 开始回到项目文件。
 
 ---
 
-# 二、第二阶段：把控制权交给 Orchestrator Agent
+# 二、第一次形成了三个角色
 
-既然问题不是“没人写代码”，而是“没人负责运行整个开发流程”，那么一个自然的想法就是：
+当时的协作结构并不是一个 Agent 自己把整个项目做完。
 
-> 增加一个主控 Agent。
-
-于是开发结构开始变成：
+而是三个角色：
 
 ```text
-                 Orchestrator
-                      │
-          ┌───────────┴───────────┐
-          ▼                       ▼
-       Builder                 Reviewer
-        写代码                  审查 / 测试
-          │                       │
-          └───────────┬───────────┘
-                      ▼
-                 Orchestrator
+Product / Business Owner
+        │
+        │
+        ├──────────────┐
+        ▼              ▼
+Design / Review     Codex Worker
+Assistant
 ```
 
-职责开始真正分离。
+## Product / Business Owner
 
-### Builder
+也就是我。
 
-只有实现权。
+负责：
 
-```text
-读取任务
-→ 修改代码
-→ 最小必要自检
-→ 提交结果
-```
+- 真实业务目标；
+- 甲方规则；
+- 架构关键取舍；
+- Review；
+- 验收；
+- 是否进入下一 Task。
 
-它不能宣布：
-
-> “这个任务已经最终通过。”
-
-因为写代码的人不应该同时拥有最终验收权。
+真正的最终控制权仍然在人。
 
 ---
 
-### Reviewer
+## Design / Review Assistant
 
-拥有验收权。
+负责：
 
-```text
-读取 Acceptance Criteria
-→ 查看 diff
-→ 选择对应测试范围
-→ PASS / FAIL / BLOCKED
-```
+- 维护项目文档；
+- 帮助拆 Task；
+- Review Worker 的 Plan；
+- Review Diff 和测试结果；
+- 检查架构漂移；
+- 帮助定位问题；
+- 经我批准以后更新设计文档。
 
-Reviewer 原则上不负责顺手修改业务代码。
+它不是主要施工者。
 
-否则：
-
-```text
-写
-+
-审
-```
-
-又重新混成了一个角色。
+它更像我的设计和 Review 助手。
 
 ---
 
-### Orchestrator
+## Codex Worker
 
-不负责具体实现。
+Worker 才是真正负责施工的角色。
 
 它负责：
 
-```text
-现在做到哪里？
-↓
-下一步应该交给谁？
-↓
-失败应该返工还是升级？
-↓
-什么时候进入下一阶段？
-```
-
-这时候 Human 第一次可以从大量日常控制动作里退出。
-
----
-
-# 三、但 Multi-Agent 又产生了一个新问题：他们怎么知道彼此做了什么？
-
-如果三个 Agent 都是独立会话：
-
-```text
-Orchestrator
-Builder
-Reviewer
-```
-
-那么很快就会遇到问题：
-
-> Builder 怎么告诉 Reviewer 自己改了什么？
-
-最简单的方法当然是聊天。
-
-但聊天并不是一个可靠的 Runtime。
-
-于是我开始把开发过程里的“对话”与“状态”分开。
-
-核心变化是：
-
-> **Agent 不应该依靠聊天记录完成交接，而应该依靠共享 State。**
-
-于是出现：
-
-```text
-.runtime/
-├── state.json
-├── current_task.json
-├── builder_result.json
-├── review_result.json
-└── events.jsonl
-```
-
-这时候两个以前很抽象的概念突然变得非常具体。
-
----
-
-# 四、State 解决“现在在哪”，Trace 解决“怎么到这里”
-
-`state.json` 保存的是当前工作现场：
-
-```text
-当前 Phase
-当前 Task
-当前状态
-当前应该由谁执行
-最后一个通过的任务
-是否存在 Block
-```
-
-它回答：
-
-> **现在是什么状态？**
-
-而 `events.jsonl` 保存：
-
-```text
-Orchestrator 派发了什么
-Builder 修改了什么
-Reviewer 为什么 FAIL
-发生过几次 Retry
-什么时候进入下一阶段
-```
-
-它回答：
-
-> **为什么变成了现在这个状态？**
-
-所以：
-
-```text
-State ≠ Trace
-```
-
-可以把它理解成：
-
-```text
-state.json
-= 当前位置
-
-events.jsonl
-= 行车记录仪
-```
-
-Agent 不需要知道所有历史聊天。
-
-只要读取 State，就能恢复当前工作。
-
-而出现问题以后，再通过 Trace 回看发生过什么。
-
----
-
-# 五、Prompt 里的“权限”并不是真正的权限
-
-接下来又出现了另一个问题。
-
-我可以在 Builder 的操作文档里写：
-
-> 你不能修改 SYSTEM.md。
-
-也可以告诉 Reviewer：
-
-> 你只能审查，不能修改业务代码。
-
-但 Agent 并不会因为我写了一句话，就真的失去修改文件的能力。
-
-这让我第一次真正区分：
-
-```text
-Role
-```
-
-和：
-
-```text
-Permission
-```
-
-Prompt 定义的是角色。
-
-但它不是权限系统。
-
-所以权限需要逐渐从文字约定向系统约束演进：
-
-```text
-Prompt Role
-    ↓
-actor
-    ↓
-expected_actor
-    ↓
-runtime_version
-    ↓
-writable_scope
-    ↓
-Git
-    ↓
-Watchdog
-    ↓
-必要时 OS ACL / Runtime CLI
-```
-
-例如每一次 Result 都带：
-
-```text
-actor = builder
-task = T-R03
-based_on_runtime_version = 18
-```
-
-主控接收时检查：
-
-```text
-你真的是当前应该执行的人吗？
-
-你依据的是不是最新 State？
-
-你操作的是不是当前 Task？
-```
-
-于是：
-
-```text
-身份
-+
-版本
-+
-作用域
-```
-
-共同形成一层轻量的 Runtime Guard。
-
-如果以后实际运行证明文字协议仍然经常被违反，再把这些约束下沉成真正的程序权限。
-
-而不是一开始就造一个复杂权限系统。
-
----
-
-# 六、Human 也不应该重新成为另一个 Orchestrator
-
-做到这里还有一个很容易发生的问题。
-
-即使有了主控 Agent，人还是可能不断插手：
-
-```text
-这个先删掉
-这个重新写
-先别测试
-换一个实现
-这个 Task 跳过
-```
-
-这样虽然表面上有 Orchestrator，但真正的 Orchestrator 仍然是 Human。
-
-所以我重新定义了 Human 的位置。
-
-在 Runtime 启动之前：
+- 阅读指定文档；
+- 理解当前 Task；
+- 输出 Plan；
+- 等待 Review；
+- 实现当前 Task；
+- 运行测试；
+- 报告 Diff；
+- 根据 Review 修复；
+- Git Commit；
+- 更新 CHANGELOG。
+
+因此第一次 Vibe Coding 并不是：
 
 ```text
 Human
 ↓
-定义 PRODUCT
+告诉 AI 一个需求
 ↓
-定义 SYSTEM
-↓
-定义 DECISIONS
-↓
-定义 TASKS
-↓
-定义 BUILD / Runtime Contract
+AI 写代码
 ```
 
-一旦开始运行：
+而已经变成：
 
 ```text
-START
-══════════════════════
-
-Agent Runtime 自治
-
-Builder
-Reviewer
-Orchestrator
-Watchdog
-
-══════════════════════
+Human
+↓
+Project Docs
+↓
+Task
+↓
+Worker Plan
+↓
+Human Decision
+↓
+Implementation
+↓
+Evidence
+↓
+Human Decision
 ```
-
-Human 不再管理中间施工。
-
-只控制 Runtime 生命周期。
 
 ---
 
-# 七、Human Control 最后被压缩成两个状态
+# 三、真正的核心：Task-by-Task
 
-这让我最终把人的运行时控制压缩到了非常简单的程度：
+当时有一个非常重要的原则：
 
-```text
-RUN
-```
+> **不要把 TASKS.md 全部一次性交给 Worker 自动完成。**
 
-或者：
-
-```text
-PAUSE_AFTER_CURRENT
-```
-
-不是让 Human 发：
-
-```text
-删除 xxx
-重写 xxx
-修改 xxx
-```
-
-Human 只告诉 Runtime：
-
-> 继续运行。
-
-或者：
-
-> 当前工作正常收口以后，不要开始新的工作。
-
-于是出现：
-
-```text
-TASKS
-= 路线图
-
-STATE
-= 当前位置
-
-HUMAN_RUNTIME_STATE
-= 方向盘
-
-EVENTS
-= 行车记录仪
-```
-
-而且 Orchestrator 每一次准备下发新任务之前，都必须重新读取 Human Runtime State。
-
-```text
-完成当前工作
-↓
-更新 State
-↓
-准备 Dispatch
-↓
-读取 Human State
-↓
-RUN?
-├── YES → Dispatch
-└── NO  → PAUSED
-```
-
-这比试图中途打断 Agent 简单很多。
-
-如果真的需要强制停止，直接 Kill。
-
-正常暂停应该发生在稳定的状态转换边界。
-
----
-
-# 八、测试也应该属于 Runtime，而不是属于 Human
-
-另一个重要变化是：
-
-以前测试是：
-
-```text
-AI 做完
-↓
-Human：
-“跑一下测试。”
-```
-
-现在测试策略应该在 Runtime 开始前就确定。
+每一次只执行一个 Task。
 
 例如：
 
 ```text
-普通代码修改
-→ Minimal Check
-
-Task Review
-→ Targeted Test
-
-Phase Complete
-→ Integration Test
-
-关键共享组件变化
-→ Impact Regression
-
-V0 Complete
-→ Full Regression
-
-Release Candidate
-→ Full Regression + Golden Dataset
+T01
+↓
+完成 / 验证
+↓
+T02
+↓
+完成 / 验证
+↓
+T03
+↓
+...
 ```
+
+给 Worker 的任务类似：
+
+```text
+阅读：
+
+PRODUCT.md
+SYSTEM.md
+DECISIONS.md
+BUILD.md
+
+执行：
+
+TASKS.md 中的 Txx
+
+要求：
+
+先输出 Plan。
+不要修改代码。
+等待 Review 后再执行。
+```
+
+这意味着 Worker 即使知道后面还有 T02、T03、T04，也不能自己一路向后施工。
+
+**项目推进权仍然属于 Human。**
+
+---
+
+# 四、Task 开始之前，先给我 Plan
+
+这是我后来依然非常喜欢第一种方式的原因。
+
+Worker 拿到 Task 以后，第一件事不是修改代码。
+
+而是：
+
+```text
+Read Docs
+↓
+Read Relevant Code
+↓
+Understand Task
+↓
+Generate Plan
+↓
+STOP
+```
+
+Plan 至少需要告诉我：
+
+```text
+当前 Task 是什么？
+
+你怎么理解这个需求？
+
+准备修改哪些文件？
+
+准备分几步实现？
+
+有什么风险？
+
+准备怎么测试？
+
+是否会触碰
+PRODUCT / SYSTEM / DECISIONS？
+```
+
+然后才来到：
+
+```text
+          Worker Plan
+               ↓
+          HUMAN GATE
+        ┌──────┼──────┐
+        ↓      ↓      ↓
+      Accept  Change  Stop
+        │
+        ▼
+    Implement
+```
+
+这个停顿非常重要。
+
+---
+
+# 五、Plan Gate 不是形式上的“审批”
+
+以前我可能会觉得：
+
+> AI 每一步都来问我，有点麻烦。
+
+后来我才意识到，这恰恰是这种模式最重要的能力之一。
+
+假设 Worker 原本准备：
+
+```text
+修改 A
++
+修改 B
++
+修改 C
++
+新增一个抽象层
++
+重构一部分旧逻辑
+```
+
+但我看到 Plan 后可能马上发现：
+
+> 不对。
+
+真正需要的可能只是：
+
+```text
+修改 A
++
+一个最小测试
+```
+
+于是原本可能发生：
+
+```text
+错误方向
+↓
+写代码
+↓
+改多个文件
+↓
+测试
+↓
+Review
+↓
+发现方向错了
+↓
+返工
+```
+
+被提前截断成：
+
+```text
+错误 Plan
+↓
+Human 发现
+↓
+修改 Plan
+↓
+再执行
+```
+
+错误停在了最便宜的位置。
+
+所以 Plan Gate 真正做的不是：
+
+> “Human 给 AI 签字。”
+
+而是：
+
+> **在真正付出实现成本之前，让 Human 有机会重新选择路径。**
+
+---
+
+# 六、我不需要比 Agent 更会写代码
+
+这也是我逐渐理解的一件事情。
+
+Worker 可能比我更熟悉：
+
+```text
+怎么拆函数
+怎么调用 API
+怎么组织模块
+怎么处理异常
+怎么写测试
+```
+
+但这不代表它应该决定所有事情。
+
+Human 更应该判断：
+
+```text
+这个功能真的有必要吗？
+
+为什么要增加这个抽象？
+
+有没有更简单的方法？
+
+这是不是已经偏离当前 Task？
+
+这个风险值得吗？
+
+现在真的需要完整测试吗？
+
+这个方向是不是和最初目标冲突？
+```
+
+于是 Human 和 Agent 的关系逐渐变成：
+
+```text
+Human
+负责目标 / 边界 / 取舍
+        ↓
+Agent
+提出实现 Plan
+        ↓
+Human
+修改路径
+        ↓
+Agent
+负责具体施工
+```
+
+我不需要亲自写出所有代码，才能拥有项目控制权。
+
+---
+
+# 七、Plan 通过以后，Worker 才开始施工
+
+只有 Plan 被接受以后：
+
+```text
+Plan Approved
+↓
+Implement
+↓
+Test
+↓
+Diff Summary
+↓
+Review
+```
+
+Worker 只能修改当前 Task 所需要的内容。
+
+如果施工过程中发现：
+
+> 顺便还可以把另外一个模块重构一下。
+
+不能直接做。
+
+而是：
+
+```text
+发现额外问题
+↓
+记录
+↓
+报告
+↓
+Human 决定
+├── 加入当前 Task
+├── 建立新 Task
+└── Ignore
+```
+
+这个规则后来一直影响我的工程思维：
+
+> **不要因为“顺手能做”，就让复杂度自然生长。**
+
+---
+
+# 八、做完以后，再把选择权交回来
+
+实现完成并不代表 Task 自动结束。
+
+Worker 需要提供证据，例如：
+
+```text
+git diff --stat
+
+关键 Diff 摘要
+
+实际运行的测试
+
+测试结果
+
+新增 / 修改测试
+
+已知限制
+
+是否与设计文档一致
+```
+
+然后再次：
+
+```text
+Implementation
+↓
+Evidence
+↓
+HUMAN GATE
+```
+
+Human 再决定：
+
+```text
+Accept
+
+Fix
+
+继续测试
+
+查看 Diff
+
+让 Review Assistant 检查
+
+自己检查代码
+
+Skip 某些验证
+
+直接进入下一步
+
+Stop
+```
+
+这也是第一代另一个非常重要的特点：
+
+> **Human 不只是决定做不做，还可以决定做到多深。**
+
+---
+
+# 九、每一步都问我，有时候就是优点
+
+假设 Agent 说：
+
+> 当前修改已经通过 targeted test，建议再运行 full regression。
+
+我可以判断：
+
+> 现在不用。
+
+然后：
+
+```text
+SKIP
+↓
+Next Step
+```
+
+也可能另一个 Task 改动了核心 Runtime。
+
+这时候我会说：
+
+> 跑全量测试。
 
 于是：
 
-> **Task 验收不等于全量验收。**
-
-测试范围由修改影响范围和当前 Gate 决定。
-
-这样既避免每一步全量测试，也避免 Agent 为了“保险”无限重复测试。
-
----
-
-# 九、重复失败不是继续 Retry 的理由
-
-如果：
-
 ```text
-FAIL
-→ 改
-→ 测
-→ FAIL
-→ 改
-→ 测
-→ FAIL
+RUN FULL TEST
+↓
+Review Result
 ```
 
-继续循环通常已经没有意义。
-
-重复失败意味着：
-
-> **当前对问题的理解可能错了。**
-
-所以 Runtime 应该升级问题：
+甚至可能测试本身没有必要：
 
 ```text
-Repeated Failure
+Agent 建议 Test
         ↓
-Root Cause Analysis
-        ↓
-┌────────┬────────┬──────────┬────────────┐
-▼        ▼        ▼          ▼
-代码问题  测试问题  环境问题    架构问题
+      Human
+   ┌────┼────┐
+   ↓    ↓    ↓
+  RUN  SKIP CHANGE
 ```
 
-前三种仍然由 Runtime 自己处理。
+因此第一代的运行路径并不是完全提前冻结的。
 
-只有最后一种：
+Human 可以不断根据刚刚获得的信息调整：
 
 ```text
-STRUCTURAL_BLOCK
+执行什么？
+
+不执行什么？
+
+验证多深？
+
+要不要继续？
+
+要不要改变方向？
 ```
-
-才应该真正暂停交给 Human。
-
-而且不能只说：
-
-> “架构可能有问题。”
-
-必须带 Evidence：
-
-```text
-发生了什么
-排除了什么
-哪条 SYSTEM / DECISION 发生冲突
-为什么局部修改解决不了
-可能有哪些结构性选择
-```
-
-于是 Human 看到的是一个已经调查过的问题。
-
-而不是 Agent 遇到困难以后把问题重新扔回来。
 
 ---
 
-# 十、做到这里，我突然发现：Orchestrator Agent 本身也可能只是一个过渡阶段
+# 十、Human 可以实时给执行路径剪枝
 
-这是这次设计里我觉得最有意思的地方。
+这是后来使用更自治的开发方式以后，我重新认识到的优势。
 
-现在 Orchestrator 会做：
-
-```text
-BUILD_DONE
-→ REVIEW
-
-REVIEW_PASS
-→ NEXT_TASK
-
-REVIEW_FAIL
-→ RETRY
-
-REPEATED_FAIL
-→ DIAGNOSE
-
-PHASE_COMPLETE
-→ INTEGRATION_TEST
-```
-
-但仔细看会发现：
-
-**这些决策很多根本不需要智能。**
-
-它们实际上已经接近：
+一个高度自治的 Runtime 可能提前规定：
 
 ```text
-状态机
-```
-
-既然如此，为什么还需要一个 LLM Agent 每次重新思考：
-
-> “接下来应该让 Reviewer 工作。”
-
-完全可以变成：
-
-```text
-if state == BUILD_DONE:
-    next = REVIEWER
-```
-
-于是整个系统又开始发生下一次变化。
-
----
-
-# 十一、第三阶段：Orchestrator 从 Agent 变成 State Machine
-
-未来真正的 Runtime 可能是：
-
-```text
-                   Runtime
-                      │
-                      ▼
-               State Machine
-                      │
-            根据 State 选择 Node
-                      │
-       ┌──────────────┼──────────────┐
-       ▼              ▼              ▼
-    Builder        Reviewer       Diagnose
-       │              │              │
-       └──────────────┴──────────────┘
-                      │
-                State Update
-                      │
-                      ▼
-                   Runtime
-```
-
-这时候主控不需要一直运行。
-
-它甚至不再是一个持续存在的 Agent。
-
-流程可以变成：
-
-```text
-Builder Node
+Implement
 ↓
-执行
+Test
 ↓
-写 State
+Review
 ↓
-结束
-↓
-Runtime 被唤醒
-↓
-读取 State
-↓
-决定下一 Node
-↓
-Reviewer Node
-↓
-执行
-↓
-结束
-```
-
-每个 Agent 都只是一个短生命周期 Worker。
-
-真正持续存在的是：
-
-```text
-State
-+
-Runtime
-```
-
-这时候控制权又向下移动了一层。
-
----
-
-# 十二、这开始越来越像 LangGraph
-
-做到这里，我突然发现以前学习 LangGraph 时的一些概念开始全部对应起来。
-
-今天文件 Runtime 里的：
-
-```text
-expected_actor = builder
-```
-
-未来其实就是：
-
-```text
-state.next = builder
-```
-
-今天的：
-
-```text
-builder_result.json
-```
-
-未来就是：
-
-```text
-Builder Node
-→ State Update
-```
-
-今天：
-
-```text
-Reviewer PASS
-→ Orchestrator
-→ 下一 Task
-```
-
-未来：
-
-```text
-Reviewer
-↓
-state.review_status = PASS
-↓
-Conditional Edge
+Regression
 ↓
 Next Task
 ```
 
-今天：
+规则一旦满足，它就继续执行。
+
+但 Human 有一种非常强的能力：
+
+> **知道什么时候“不值得继续做”。**
+
+例如：
 
 ```text
-PAUSE_AFTER_CURRENT
+这个测试现在不用跑。
+
+这个 Review 没必要。
+
+这个方案不要继续研究。
+
+先验证最小路径。
+
+这个问题暂时接受。
+
+这里不用继续优化。
 ```
 
-未来：
+于是 Human 可以直接剪掉执行树上的分支：
 
 ```text
-Human State
-↓
-Conditional Edge
-├── PAUSE → Checkpoint / END
-└── RUN   → Next Node
+                 Current State
+                      │
+          ┌───────────┼───────────┐
+          ▼           ▼           ▼
+        Test        Review      Continue
+          │
+          X
+       Human Skip
 ```
 
-以前我学习：
+节省的不只是时间。
+
+还可能包括：
 
 ```text
-State
-Node
-Runtime
-Conditional Edge
-Checkpoint
-Interrupt
+Token
+Context
+Agent 调用
+测试时间
+返工
+无意义探索
 ```
 
-这些东西时，很容易把它们理解成 LangGraph 提供的一组 API。
+所以“每一步都问我”并不天然意味着设计落后。
 
-但现在重新看，它们其实都是某种真实工程问题的答案。
+它付出的是：
+
+> Human Attention。
+
+换来的是：
+
+> **运行时路径选择权。**
 
 ---
 
-# 十三、TASKS 未来也可能从文档变成真正的任务队列
+# 十一、Human 不需要默认逐行看代码
 
-现在：
+保留 Human Gate 也不意味着：
+
+> 每个 Task 我都必须逐行 Code Review。
+
+否则 Agent 写代码的速度远远超过 Human 读代码的速度。
+
+更合理的方式是从证据开始。
+
+例如：
 
 ```text
-TASKS.md
+Task: T07
+
+Goal:
+实现 Context Builder
+
+Changed:
+3 files
+
+Targeted Tests:
+17 PASS
+
+Regression:
+324 PASS
+
+Architecture Drift:
+NO
+
+Business Rule Change:
+NO
+
+Known Limitation:
+xxx
 ```
 
-主要还是给 Orchestrator 阅读。
-
-但未来任务本身也可以结构化：
+Human 首先看：
 
 ```text
-T01 READY
-
-T02 WAITING(T01)
-
-T03 WAITING(T01)
-
-T04 WAITING(T02, T03)
-```
-
-于是 Runtime 可以自己判断：
-
-```text
-哪些 Task 已经 READY？
-↓
-Dispatch
-↓
-完成
-↓
-更新 Dependency
-↓
-新的 Task READY
-```
-
-如果：
-
-```text
-T02
-```
-
-和：
-
-```text
-T03
-```
-
-之间没有依赖：
-
-```text
-        T01
-       /   \
-     T02   T03
-       \   /
-        T04
-```
-
-那么自然就会出现：
-
-```text
-fan-out
-↓
-Builder A → T02
-Builder B → T03
-↓
-join
-↓
-T04
-```
-
-这时候以前学过的：
-
-```text
-Send
-Reducer
-Join
-Parallel Worker
-```
-
-也开始拥有真实意义。
-
-不是因为：
-
-> “LangGraph 有这些功能，所以我要用。”
-
-而是因为：
-
-> **我的 Runtime 真的出现了动态任务、并行执行和状态合并的问题。**
-
----
-
-# 十四、最终的进化线
-
-回头看，这套开发方式其实形成了一条非常自然的进化路线。
-
-## V0：Human 是 Runtime
-
-```text
-Human
-↓
-Worker
-↓
-Human Review
-↓
-Next Task
-```
-
-AI 负责执行。
-
-Human 负责控制。
-
----
-
-## V1：Orchestrator Agent 是 Runtime
-
-```text
-           Orchestrator
-          /            \
-     Builder          Reviewer
-          \            /
-             State
-```
-
-Human 从正常控制环退出。
-
-Agent 开始通过共享 State 协作。
-
----
-
-## V2：State Machine 是 Runtime
-
-```text
-State
-↓
-Deterministic Runtime
-↓
-Builder / Reviewer / Diagnose Nodes
-↓
-State Update
-```
-
-确定性的调度不再消耗 LLM 推理。
-
-Agent 只负责真正需要智能的节点。
-
----
-
-## V3：Graph Runtime
-
-当系统真正出现：
-
-```text
-任务依赖
-动态任务
-并行
-Fan-out
-Join
-Checkpoint
-Interrupt
-Retry
-Recovery
-```
-
-再演化成：
-
-```text
-Graph Runtime
-```
-
-此时：
-
-```text
-Builder
-Reviewer
-Diagnose
-Planner
-```
-
-只是 Graph 上不同能力的 Node。
-
----
-
-# 十五、我真正想要的不是“多 Agent”，而是控制权逐步下沉
-
-这次最大的变化其实不是：
-
-> 我从一个 Agent 变成了四个 Agent。
-
-真正发生变化的是：
-
-```text
-Human
-  ↓
-Orchestrator Agent
-  ↓
-State Machine
-  ↓
-Graph Runtime
-```
-
-控制权不断从昂贵、不稳定、需要持续注意力的上层，向更确定的下层移动。
-
-可以确定的：
-
-```text
-交给程序。
-```
-
-存在语义不确定性的：
-
-```text
-交给 Agent。
-```
-
-涉及架构、产品、责任和风险边界的：
-
-```text
-留给 Human。
-```
-
-所以最终形成的不是：
-
-> **Everything is Agent。**
-
-反而是：
-
-> **只让 Agent 留在真正需要 Agent 的地方。**
-
----
-
-# 十六、这也改变了我对 AI Coding 的理解
-
-以前我会觉得：
-
-> AI Coding 的核心是怎么让 AI 写出更好的代码。
-
-现在我更倾向于认为：
-
-> **真正的问题是如何设计一个系统，让 AI 能够在明确边界内持续工作，而 Human 不需要成为它的实时调度器。**
-
-于是人的工作逐渐从：
-
-```text
-写代码
-盯代码
-告诉 AI 下一步
-检查每个中间状态
-```
-
-变成：
-
-```text
-定义问题
-↓
-定义 PRODUCT
-↓
-设计 SYSTEM
-↓
-做关键 DECISIONS
-↓
-定义 Runtime Contract
-↓
-让 Runtime 构建
-↓
-拿完整产品真实使用
-↓
-观察 Trace / Evidence
-↓
-发现真正的问题
-↓
-进入下一轮设计
-```
-
-我不再希望每完成一步，AI 都回来问我：
-
-> “这样对吗？”
-
-只要没有出现系统性、结构性错误：
-
-> **先按照已经确定的设计把它做出来。**
-
-等真正的成品运行起来以后，我再从系统行为判断哪里应该修改。
-
-因为很多问题只有系统完整运行以后才真正存在。
-
----
-
-# 十七、最后：不要一开始就造最终 Runtime
-
-虽然已经能够看到：
-
-```text
-State Machine
-Graph Runtime
-Parallel Worker
-Checkpoint
-Interrupt
-```
-
-但我现在并不准备立刻实现它们。
-
-当前真正需要的是：
-
-```text
-多个 Agent Session
+Result
 +
-Role Instructions
-+
-Shared State
-+
-Result Files
-+
+Evidence
+```
+
+如果已经足够：
+
+```text
+CONTINUE
+```
+
+如果不够：
+
+```text
+Result / Evidence
+       ↓
+Reviewer Analysis
+       ↓
+Diff
+       ↓
+Code
+       ↓
+Debug
+```
+
+逐层向下。
+
+所以 Human Gate 的目标不是证明：
+
+> “我亲眼检查过 AI 写的每一行代码。”
+
+而是：
+
+> **我拥有足够证据决定项目是否应该继续。**
+
+---
+
+# 十二、什么时候我会自己看代码？
+
+当代码本身成为判断所需证据时。
+
+例如：
+
+```text
+业务规则变化
+
+架构边界变化
+
+State Transition
+
+恢复 / 幂等
+
+权限
+
+删除 / 覆盖
+
+外部副作用
+
+测试无法解释的异常
+
+Worker 与 Reviewer 判断冲突
+
+我自己对结果产生怀疑
+```
+
+这时候：
+
+```text
+Evidence 不够
+↓
+Human Drill Down
+↓
+Diff
+↓
+Code
+```
+
+所以：
+
+> **看不看代码也是 Human 的运行时决策。**
+
+而不是固定仪式。
+
+---
+
+# 十三、原来的 Gate 很严格，但今天我不会全部写死
+
+第一次项目里的 BUILD 对工程流程要求非常严格：
+
+```text
+Plan Gate
+
+Scope Gate
+
+Review Gate
+
+Git Gate
+
+Test Gate
+
+Documentation Gate
+
+Log Gate
+
+Regression Gate
+```
+
+这些 Gate 帮助我第一次真正把一个 AI 项目收口成工程。
+
+所以它们非常有价值。
+
+但如果今天重新使用第一种开发方式，我不会把所有 Gate 都理解成：
+
+> 每次必须完整执行。
+
+而更愿意理解成：
+
+```text
+Available Gates
+
+Plan
+Scope
+Test
+Review
+Regression
 Git
-+
-Trace
-+
-Human Runtime State
+Documentation
+Log
+        │
+        ▼
+Human 根据当前状态
+决定执行深度
 ```
 
-先让它真正跑一个项目。
+当然，真正危险或者不可逆的动作仍然应该有硬边界。
 
-如果未来发现：
+但普通施工过程没有必要为了流程完整而执行没有价值的步骤。
 
-> Orchestrator 绝大多数时候只是在机械执行状态转换。
+---
 
-再把它下沉成 State Machine。
+# 十四、这套模式真正控制的不是 Task，而是路径
 
-如果未来真的出现：
+一开始我以为：
 
-> 并行、动态任务、Join、恢复。
+> Human 控制的是 Task 生命周期。
 
-再引入 Graph Runtime。
+后来发现还不够准确。
 
-这也是我现在越来越认可的一条工程原则：
-
-> **不要因为某个机制先进就加入它，而是等问题出现以后，让机制获得存在的资格。**
-
-所以这条进化路线不是我要提前全部实现的架构图。
-
-它更像一个方向：
+Human 实际控制：
 
 ```text
-Human Runtime
-      ↓
-Agent Runtime
-      ↓
-State Machine Runtime
-      ↓
-Graph Runtime
+这个 Task 做不做？
+↓
+这个 Plan 怎么走？
+↓
+实现范围多大？
+↓
+要不要测试？
+↓
+测试多深？
+↓
+要不要 Review？
+↓
+我要不要自己看代码？
+↓
+这个结果够不够？
+↓
+要不要进入下一 Task？
 ```
 
-每往下一层，都意味着一部分已经被证明足够确定的控制权，从 Human 或 LLM 手里移交给程序。
-
-而 Human 最终留下的，应该是那些最难下沉的事情：
+所以第一代真正的运行模型应该是：
 
 ```text
-定义问题
-价值判断
-架构选择
-边界设计
-风险承担
-最终责任
+Agent
+↓
+提出下一动作
+↓
+Human 判断
+├── RUN
+├── SKIP
+├── CHANGE
+└── STOP
+↓
+Agent 执行
+↓
+产生新证据
+↓
+再次提出下一动作
+↓
+Human 再判断
 ```
 
-这可能才是我目前对 AI Coding 最重要的一次理解：
+因此我更愿意把它叫做：
 
-> **AI 的价值不只是替我写更多代码，而是让我逐渐退出那些已经可以被系统接管的控制环，把注意力留给仍然需要人做判断的地方。**
+> **Human-Controlled Interactive Development**
+
+Agent 负责工作。
+
+Human 控制路径。
+
+---
+
+# 十五、为什么这种模式特别适合探索性项目？
+
+因为有些项目在开始的时候，下一步本来就是未知的。
+
+例如：
+
+```text
+最初理解
+↓
+Task 1
+↓
+得到新信息
+↓
+修改原来的认识
+↓
+Task 2
+↓
+发现新问题
+↓
+重新调整
+↓
+Task 3
+```
+
+这时候如果提前要求：
+
+> 把整个流程冻结，然后让 Runtime 自动执行。
+
+可能反而是在强迫系统沿着一个还没有被证明正确的路径继续走。
+
+而 Interactive Development 允许：
+
+> **设计和施工交替演化。**
+
+每完成一步，Human 都重新获得一次决策机会。
+
+所以这里的停顿不是浪费。
+
+> **停顿本身就是开发过程的一部分。**
+
+---
+
+# 十六、第一代真正的问题：Human 也是 Runtime
+
+当然，这种模式有非常明显的成本。
+
+整个系统实际上是：
+
+```text
+                  Human
+                    │
+              Select Task
+                    │
+                    ▼
+                  Worker
+                    │
+                  Plan
+                    │
+                    ▼
+                  Human
+                    │
+                 Approve
+                    │
+                    ▼
+                  Worker
+                    │
+             Implement / Test
+                    │
+                    ▼
+                  Human
+                    │
+            Accept / Change
+                    │
+                    ▼
+                Next Task
+```
+
+也就是说：
+
+> **Human 本身就是 Runtime。**
+
+如果我离开：
+
+```text
+Worker 完成
+↓
+等待
+↓
+……
+```
+
+项目也会停下来。
+
+所以它无法很好地无人值守运行。
+
+Human Attention 也成为持续成本。
+
+---
+
+# 十七、什么时候这个缺点开始真正成为问题？
+
+关键并不是项目“大不大”。
+
+而是：
+
+> **Human 每一次被叫回来时，还有没有提供新的判断？**
+
+假设 Agent 连续十次问：
+
+```text
+Plan 是否执行？
+```
+
+我每次都：
+
+> Yes。
+
+又连续十次问：
+
+```text
+Targeted Test 是否运行？
+```
+
+我还是：
+
+> Yes。
+
+Review PASS 以后：
+
+```text
+是否进入下一 Task？
+```
+
+答案永远：
+
+> Continue。
+
+这时候 Human Gate 已经没有提供新的信息。
+
+它开始退化成：
+
+```text
+Agent
+↓
+等待 Human 点 Yes
+↓
+Agent
+↓
+等待 Human 点 Yes
+↓
+Agent
+↓
+等待 Human 点 Continue
+```
+
+这才是真正值得自动化的信号。
+
+---
+
+# 十八、什么时候我今天仍然会选择第一代？
+
+如果一个项目：
+
+```text
+路径还不确定
+
+每个 Task 都可能改变后面的设计
+
+我希望跟着施工一起理解项目
+
+下一步高度依赖刚得到的结果
+
+我经常会拒绝 Agent 的 Plan
+
+我经常会跳过某些 Test / Review
+
+Token / Runtime 成本需要实时控制
+
+项目不需要长时间无人值守
+```
+
+我会主动选择：
+
+> **Human-Controlled Interactive Development。**
+
+因为这时候 Human Gate 不是瓶颈。
+
+Human Gate 本身就在产生价值。
+
+反过来，如果：
+
+```text
+设计已经稳定
+
+Task 明确
+
+Acceptance 明确
+
+正常 Transition 高度重复
+
+Human 基本只是在点击 Continue
+```
+
+那么这些 Gate 才开始获得下沉给 Runtime 的资格。
+
+---
+
+# 十九、这不是第一代淘汰第二代，也不是第二代淘汰第一代
+
+后来我尝试了更自治的开发方式。
+
+Human 可以提前定义：
+
+```text
+什么时候 Review
+
+什么时候 Test
+
+什么时候 Retry
+
+什么时候 Stop
+
+什么情况 Human Required
+```
+
+然后 Runtime 自己执行正常流程。
+
+这同样非常有价值。
+
+而且自治程度高也不代表 Human 失去控制。
+
+因为：
+
+> **协议仍然是 Human 写的。**
+
+Human 仍然可以规定：
+
+```text
+Review 只在某些条件触发
+
+Full Test 只在阶段结束执行
+
+某些操作必须 Human 主动发起
+
+某些异常必须立即停止
+
+某些 Task 不允许自动推进
+```
+
+所以第一代和后来的自治 Runtime 不是：
+
+```text
+Human Control
+VS
+No Human Control
+```
+
+而更像：
+
+```text
+第一代
+
+Human 在运行过程中
+持续注入决策
+```
+
+与：
+
+```text
+第二 / 第三代
+
+Human 把更多决策
+提前写进 Protocol
+↓
+Runtime 根据协议自治
+```
+
+它们只是把 Human Decision 放在了不同的位置。
+
+---
+
+# 二十、一个判断：这个 Gate 应不应该自动化？
+
+现在如果让我重新判断一个 Human Gate 是否应该保留，我会问：
+
+> **如果 Agent 每次问我，我的答案都可能不同吗？**
+
+如果答案是：
+
+> 会。
+
+那就保留。
+
+因为 Human 仍然在提供信息。
+
+如果：
+
+> 它问我十次，我十次都会给出相同答案。
+
+那就应该开始问：
+
+> **为什么还要问？**
+
+这个 Gate 已经获得了下沉给 Runtime 的资格。
+
+这也是后来我开始尝试更高自治开发方式的原因。
+
+---
+
+# 二十一、第一代完整运行模型
+
+最终可以把这种开发方式压缩成：
+
+```text
+             Project Docs
+                  │
+                  ▼
+               Current Task
+                  │
+                  ▼
+                Worker
+                  │
+              Propose Plan
+                  │
+                  ▼
+                Human
+        ┌─────────┼─────────┐
+        ▼         ▼         ▼
+       RUN      CHANGE      STOP
+        │
+        ▼
+      Worker
+        │
+     Implement
+        │
+        ▼
+   Result + Evidence
+        │
+        ▼
+      Human
+   ┌────┼────┬───────┐
+   ▼    ▼    ▼       ▼
+ TEST REVIEW SKIP   DRILL DOWN
+   │    │             │
+   └────┴──────┬──────┘
+               ▼
+             Human
+        ┌──────┼──────┐
+        ▼      ▼      ▼
+      NEXT    FIX    STOP
+```
+
+其中：
+
+```text
+Agent
+→ 提出路径
+→ 执行路径
+→ 提供证据
+
+Human
+→ 选择路径
+→ 修改路径
+→ 决定执行深度
+→ 决定是否继续
+```
+
+---
+
+# 二十二、给其他 AI：如何生成这种开发模式
+
+如果以后我要重新采用第一代方式，可以直接把下面的协议交给 AI。
+
+```text
+我要使用一种：
+
+HUMAN_CONTROLLED_INTERACTIVE_DEVELOPMENT
+
+开发模式。
+
+核心原则：
+
+Agent 负责分析、提出下一步方案和执行；
+Human 保留关键分叉点的路径选择权。
+
+这不是 Autonomous Runtime。
+
+不要自动连续执行整个 TASKS。
+不要因为能够自动化就主动增加 Runtime、Queue、
+Watcher、Graph 或其他自治机制。
+
+一、项目资料
+
+优先建立或读取：
+
+PRODUCT.md
+SYSTEM.md
+DECISIONS.md
+TASKS.md
+BUILD.md
+CHANGELOG.md
+
+Project Files 是 Source of Truth。
+Chat History 不是项目状态。
+
+二、角色
+
+至少区分：
+
+1. Human Owner
+
+负责：
+
+- 产品目标
+- 业务规则
+- 架构关键取舍
+- Scope
+- 是否批准 Plan
+- 验证深度
+- 是否进入下一 Task
+- 最终责任
+
+2. Design / Review Assistant（可选）
+
+负责：
+
+- 帮助维护设计文档
+- 帮助拆 Task
+- Review Plan
+- Review Diff / Test / Evidence
+- 检查 Architecture Drift
+- 帮助 Human 理解问题
+
+它是 Human 的工具。
+它不拥有项目推进权。
+
+3. Worker
+
+负责：
+
+- 读取项目资料
+- 读取当前 Task
+- 分析相关代码
+- 提出 Plan
+- 获得批准后实现
+- 运行被批准或协议要求的验证
+- 输出 Evidence
+- 根据 Human 决策修复
+- 在批准后 Commit / 记录
+
+三、Task 执行协议
+
+每次只处理一个 Current Task。
+
+开始时：
+
+Read Docs
+→ Read Relevant Code
+→ Understand Task
+→ Generate Plan
+→ STOP
+
+Plan 至少说明：
+
+- Current Task
+- Requirement Understanding
+- Files To Change
+- Implementation Steps
+- Scope
+- Risk
+- Suggested Tests
+- 是否触碰 PRODUCT / SYSTEM / DECISIONS
+
+在 Human 明确批准前：
+
+不得修改代码。
+
+Human 可以：
+
+RUN
+CHANGE
+SKIP
+STOP
+
+四、执行阶段
+
+Plan 获批后，只在批准 Scope 内施工。
+
+发现额外问题时：
+
+记录并报告。
+
+不要顺手扩展 Scope。
+不要顺手重构整个项目。
+不要自动增加新的架构复杂度。
+
+需要改变：
+
+PRODUCT
+SYSTEM
+DECISIONS
+业务规则
+关键依赖
+重要边界
+
+时，STOP 并返回 Human。
+
+五、完成阶段
+
+实现后返回最小但足够的 Evidence：
+
+- Changed Files
+- Diff Summary
+- Acceptance Status
+- Tests Already Run
+- Suggested Additional Tests
+- Known Limitations
+- Architecture Drift
+- Business Rule Change
+- Suggested Next Action
+
+然后等待 Human。
+
+不要默认自动进入下一 Task。
+
+六、验证深度由 Human 决定
+
+Human 可以选择：
+
+RUN TEST
+SKIP TEST
+TARGETED TEST
+FULL REGRESSION
+AGENT REVIEW
+HUMAN DIFF REVIEW
+HUMAN CODE REVIEW
+FIX
+NEXT
+STOP
+
+不要假设每个 Task 都需要相同验证深度。
+
+如果建议执行 Test / Review，请同时说明：
+
+为什么建议执行；
+不执行的主要风险是什么。
+
+让 Human 根据当前目标、成本和风险选择。
+
+七、Review 原则
+
+Human 不需要默认逐行阅读代码。
+
+默认从：
+
+Result
++
+Evidence
+
+开始。
+
+证据不足时再逐层下钻：
+
+Result / Evidence
+→ Reviewer Analysis
+→ Diff
+→ Code
+→ Debug
+
+Human 的目标不是证明自己检查了每一行代码。
+
+Human 的目标是获得足够证据决定项目是否应该继续。
+
+八、项目推进权
+
+Worker 完成当前工作后不得自动领取下一 Task。
+
+必须等待 Human：
+
+NEXT
+FIX
+CHANGE
+STOP
+
+只有 Human 拥有项目推进权。
+
+九、复杂度原则
+
+复杂度必须获得存在资格。
+
+自治也必须获得存在资格。
+
+如果某个 Human Gate 仍然经常产生不同决策，
+保留它。
+
+如果同类 Gate 反复出现，
+而 Human 几乎总是给出相同答案，
+记录这个信号。
+
+它可能已经适合在下一阶段下沉给 Runtime。
+
+十、最终目标
+
+这套模式追求的不是最大自动化。
+
+它追求：
+
+Agent 承担施工能力，
+Human 保留有价值的运行时判断。
+
+Agent 每到重要分叉点，
+把选择权还给 Human。
+```
+
+如果最终生成的开发流程变成：
+
+```text
+Human
+↓
+START
+↓
+Agent 自动完成全部 TASKS
+↓
+Human
+```
+
+说明已经偏离了这种模式。
+
+正确形态应该始终保留：
+
+```text
+Agent
+↓
+Propose
+↓
+Human Decide
+↓
+Agent Execute
+↓
+Evidence
+↓
+Human Decide
+↓
+Next
+```
+
+---
+
+# 二十三、后来为什么还要继续进化？
+
+第一代已经能够很好地完成项目。
+
+真正推动我继续改变它的，并不是：
+
+> 它不能工作。
+
+恰恰相反。
+
+是因为它工作以后，我开始发现：
+
+```text
+有些 Plan
+我总是批准。
+
+有些 Test
+我总是执行。
+
+有些 Review PASS
+我总是进入 Next Task。
+
+有些 Transition
+已经不再需要我真正思考。
+```
+
+如果 Human 每一次出现都在提供新的判断，那么 Human 应该留下。
+
+但如果 Human 只是机械地重复：
+
+> Yes。  
+> Continue。  
+> Run。  
+> Next。
+
+那么问题就变成了：
+
+> **这些已经稳定下来的判断，为什么不能提前写进协议？**
+
+于是我的第二次尝试开始改变一个东西：
+
+不是让 Agent 写更多代码。
+
+而是尝试把那些已经不再需要 Human 临场判断的控制权，逐渐交给 Runtime。
+
+第一代解决的是：
+
+> **怎么让 Agent 在 Human 控制下完成一个真实项目。**
+
+而接下来的问题变成了：
+
+> **哪些控制权应该继续属于 Human，哪些已经获得了下沉的资格？**
+
+这成为下一阶段的起点。
