@@ -1,9 +1,9 @@
 ---
 description: ""
-title: "从单 Worker 到 Multi-Agent：我的 AI Coding 工程协作手册"
+title: "第二次 Vibe Coding：把 Human 从施工循环里移出去"
 draft: false
 date: "2026-09-27T05:39:46+08:00"
-slug: "Agents"
+slug: "VibeCodingOne"
 categories:
  - VibeCoding
 tags:
@@ -11,1079 +11,1206 @@ tags:
 image: ""
 ---
 
-# 从单 Worker 到 Multi-Agent：我的 AI Coding 工程协作手册
+# 第二次 Vibe Coding：把 Human 从施工循环里移出去
 
-> V0.2：在 V0.1 的单 Worker / Multi-Agent 文档体系上，增加 Risk-based Review、人类注意力分配、Human Gate，以及最终系统全景图。
+第一次 Vibe Coding 时，我已经能够把一个完整项目拆成：
+
+```text
+PRODUCT
+SYSTEM
+DECISIONS
+TASKS
+BUILD
+```
+
+然后：
+
+```text
+Human
+↓
+启动 Task
+↓
+Agent 完成
+↓
+Human
+↓
+下一 Task
+```
+
+这种方式很好理解，也很好控制。
+
+但它有一个非常明显的特点：
+
+> **项目能不能继续运行，取决于 Human 有没有回来。**
+
+后来开始做企业知识库项目时，我想尝试另一种开发方式：
+
+> 如果产品、系统、关键决策和任务已经基本确定，能不能让 Agent 自己完成正常施工循环？
+
+于是第二次 Vibe Coding 的核心问题从：
+
+> 怎么让 Agent 完成一个 Task？
+
+变成了：
+
+> **怎么让一个项目在 Human 不持续调度的情况下继续施工？**
 
 ---
 
-## 三十五、不是所有代码都值得 Human Review
+# 一、Human 先退出施工，而不是退出项目
 
-最开始使用 Coding Agent 时，我很容易默认：
+我并不是想让 AI 自己决定整个产品。
+
+知识库项目开始施工之前，Human 仍然负责：
 
 ```text
-AI写代码
-   ↓
-我看代码
-   ↓
-确认没问题
-   ↓
-继续
+问题定义
+↓
+PRODUCT
+↓
+SYSTEM
+↓
+关键 DECISIONS
+↓
+TASKS
+↓
+BUILD
 ```
 
-但随着项目越来越复杂，我发现这其实会产生新的瓶颈：
+尤其是：
 
-> AI 写代码的速度远高于人读代码的速度。
+```text
+产品到底解决什么问题？
+LLM 应该做什么？
+LLM 不应该做什么？
+知识如何检索？
+什么必须保留证据？
+什么判断必须留给 Human？
+哪些设计已经冻结？
+```
 
-如果 AI 每写一个文件、一个函数，我都重新阅读实现，那么 AI 虽然提高了 Coding Speed，却没有真正提高整个系统的 Throughput。
+这些东西仍然需要先确定。
 
-真正应该问的不是：
+所以 Human 并没有退出。
 
-> “这段代码是不是 AI 写的？”
+Human 只是从：
 
-而是：
+```text
+施工过程的每一次状态转换
+```
 
-> **“这段代码如果错了，会造成什么后果？我能不能通过低成本证据发现它错了？错了以后能不能恢复？”**
+里退出。
 
-因此 Review 不应该平均分配，而应该根据风险分配。
+整个结构开始变成：
+
+```text
+              Human
+                │
+        Product / System
+        Decisions / Tasks
+                │
+                ▼
+         Frozen Design
+                │
+                ▼
+        Agent Runtime
+                │
+          Autonomous Build
+                │
+                ▼
+             Product
+                │
+                ▼
+              Human
+```
+
+Human 控制：
+
+> **设计和边界。**
+
+Runtime 控制：
+
+> **已经确定范围内的施工。**
 
 ---
 
-# 三十六、Risk-based Review：按照风险决定 Review 深度
+# 二、为什么一个 Agent 不够？
 
-判断一个 Task 是否需要 Human Review，可以看三个变量：
+如果仍然把所有事情交给同一个 Agent：
 
 ```text
-                 Failure Impact
-                  失败后果
-                     ↑
-                     │
-                     │
-                     │
-低验证成本 ←── Verifiability ──→ 高验证难度
-                     │
-                     │
-                     ↓
-                Reversibility
-                  可逆性
+读取 Task
+↓
+写代码
+↓
+测试
+↓
+判断自己是否正确
+↓
+宣布 PASS
+↓
+进入下一 Task
 ```
 
-三个问题：
+会出现一个很明显的问题：
+
+> **写代码的人同时拥有最终验收权。**
+
+它可能：
 
 ```text
-① Failure Impact
-如果错了，损失多大？
-
-② Verifiability
-能不能通过测试/结果可靠发现错误？
-
-③ Reversibility
-出错以后能不能轻易恢复？
+误解 Task
+↓
+按照自己的误解实现
+↓
+再按照同一个误解验证
+↓
+认为自己完成了
 ```
 
-因此可以把任务粗略分为三个等级。
+所以我开始把不同责任拆开。
 
-| Risk | 特征 | Review |
-|---|---|---|
-| LOW | 易验证、易恢复、低副作用 | Worker + Reviewer 自动完成 |
-| MEDIUM | 业务核心、可能 Silent Failure | Reviewer 强验证，Human 看 Specification/关键决策 |
-| HIGH | 高副作用、不可逆、安全相关 | Human Gate |
-
-这里非常重要的一点是：
-
-> **核心业务代码不一定需要人逐行看代码。**
-
-Human 更应该确认：
+最基础的是：
 
 ```text
-Business Rule
-Acceptance Criteria
-Edge Cases
-Architecture Boundary
+Control
+Implementation
+Verification
 ```
 
-至于具体：
+在当时的项目里，它们可以表现为：
 
 ```text
-for怎么写
-函数怎么拆
-用了什么临时变量
-Parser内部怎么循环
+Orchestrator / Lead
+Worker / Builder
+Reviewer
 ```
 
-只要可以被可靠验证，就可以交给 Worker + Reviewer。
+名称不是最重要的。
 
-因此 Human Review 可以逐渐从：
+真正重要的是职责分离：
 
 ```text
-Code Review
+Control
+→ 现在应该做什么？
+
+Worker
+→ 把当前任务实现出来。
+
+Reviewer
+→ 它真的符合 Acceptance 吗？
 ```
 
-转向：
+于是：
 
 ```text
-Specification Review
+        Control
+           │
+           ▼
+         Worker
+           │
+           ▼
+        Reviewer
+        ↙      ↘
+      FAIL     PASS
+       │         │
+       ▼         ▼
+     Rework    Next Task
+```
+
+这时候 Human 第一次有可能退出正常施工循环。
+
+---
+
+# 三、多个 Agent 不能靠聊天记住项目
+
+角色拆开以后，一个新的问题马上出现：
+
+> Worker 做完以后，Reviewer 怎么知道发生了什么？
+
+如果靠 Human：
+
+```text
+Worker
+↓
+告诉 Human
+↓
+Human 复制给 Reviewer
+↓
+Reviewer
+```
+
+那 Human 只是从：
+
+> Task 调度器
+
+变成了：
+
+> Agent 消息搬运工。
+
+这没有解决问题。
+
+所以 Agent 之间必须共享同一个外部世界。
+
+这个外部世界就是：
+
+```text
+Shared Project
 +
-Evidence Review
+Markdown Contract
 +
-Risk Review
+Shared State
 ```
 
 ---
 
-# 三十七、LOW：可以完全退出 Human Review 的任务
+# 四、Shared Project：真正发生了什么
+
+代码、测试、配置、文档都存在同一个项目目录。
 
 例如：
 
 ```text
-普通CSV读取
-JSONL写入
-Formatter
-Parser
-字符串处理
-Keyword Position
-Context Window
-Deduplicate
-普通Metrics
-普通日志
-数据结构转换
+src/
+tests/
+
+PRODUCT.md
+SYSTEM.md
+DECISIONS.md
+TASKS.md
+BUILD.md
 ```
 
-如果能够建立：
+Worker 修改：
 
 ```text
-明确Input
-+
-明确Output
-+
-Acceptance
-+
-Unit Test
-+
-Integration Test
+src/retrieval.py
+```
+
+Reviewer 不需要 Worker 把整个文件重新复制给它。
+
+Reviewer 自己读取真实项目即可。
+
+所以：
+
+> **Project Files 是事实。**
+
+Agent 的描述不是事实本身。
+
+---
+
+# 五、Markdown Contract：大家应该怎么协作
+
+只有共享项目还不够。
+
+Agent 还需要知道：
+
+```text
+我是谁？
+我负责什么？
+我不能做什么？
+现在应该读取什么？
+完成以后交给谁？
+什么时候必须停下来？
+什么时候需要 Human？
+```
+
+所以协作规则也开始从聊天中移出去。
+
+例如：
+
+```text
+.agents/
+├── COMMON.md
+├── RUNTIME.md
+└── roles/
+    ├── CONTROL.md
+    ├── WORKER.md
+    └── REVIEWER.md
+```
+
+这些文件不是项目业务事实。
+
+它们定义的是：
+
+> **Agent 如何围绕这个项目协作。**
+
+于是：
+
+```text
+Project
+= 做什么
+
+Contract
+= 怎么协作
+```
+
+开始被分开。
+
+---
+
+# 六、Shared State：现在运行到哪里
+
+即使所有 Agent 都知道规则，还需要知道：
+
+> 当前项目现在在哪里？
+
+所以出现 Shared State。
+
+例如：
+
+```json
+{
+  "current_task": "T007",
+  "current_role": "WORKER",
+  "status": "RUNNING",
+  "review_attempt": 1,
+  "human_required": false,
+  "pause_requested": false
+}
+```
+
+它回答：
+
+```text
+当前 Task 是什么？
+现在轮到谁？
+刚刚发生了什么？
+Review 到第几轮？
+是否需要 Human？
+```
+
+这样新的 Agent 被启动以后，不需要依赖旧 Session 的聊天历史。
+
+它可以：
+
+```text
+读取 Contract
+↓
+读取 State
+↓
+读取 Current Task
+↓
+读取真实 Project
+↓
+恢复当前工作
+```
+
+这时候 Conversation 第一次真正从 Runtime State 里被剥离出去。
+
+---
+
+# 七、Project、Contract、State 开始各自负责一件事
+
+整个结构逐渐稳定成：
+
+```text
+Shared Project
+│
+│ 保存真实工作结果
+│
+├── Code
+├── Tests
+└── Docs
+
+
+Markdown Contract
+│
+│ 保存协作规则
+│
+├── Common Rules
+├── Runtime Rules
+└── Role Rules
+
+
+Shared State
+│
+│ 保存当前运行现场
+│
+├── Current Task
+├── Current Role
+├── Status
+├── Retry
+└── Human Required
+```
+
+于是三个问题被分开：
+
+```text
+发生了什么？
+→ Project
+
+应该怎么协作？
+→ Contract
+
+现在运行到哪里？
+→ State
+```
+
+这比把所有东西都塞进聊天历史稳定得多。
+
+---
+
+# 八、Handoff 只需要告诉下一角色去哪里看
+
+Agent 之间仍然需要交接。
+
+但既然大家共享 Project，就没有必要复制完整工作内容。
+
+例如 Worker 完成：
+
+```text
+Task: T007
+Status: WORK_DONE
+
+Changed:
+- src/retrieval.py
+- tests/test_retrieval.py
+
+Verification:
+- targeted tests PASS
+
+Attention:
+- semantic fallback branch
+```
+
+Reviewer 看到以后：
+
+```text
+知道改了哪里
+↓
+自己读真实文件
+↓
+自己看 Diff
+↓
+自己运行必要验证
+```
+
+所以 Handoff 更像：
+
+> **导航卡。**
+
+而不是：
+
+> 工作结果的副本。
+
+可以简单概括为：
+
+> **Project 保存事实，Handoff 保存指针。**
+
+---
+
+# 九、正常状态转换开始从 Human 手里移出去
+
+第一代：
+
+```text
+Worker 完成
+↓
+Human
+↓
+Reviewer
+
+Reviewer PASS
+↓
+Human
+↓
+Next Task
+```
+
+第二代希望变成：
+
+```text
+Worker 完成
+↓
+State = WORK_DONE
+↓
+Reviewer
+
+Reviewer PASS
+↓
+State = REVIEW_PASS
+↓
+Next Task
+```
+
+也就是说：
+
+> **正常、重复、已经有明确规则的 Transition，不再需要 Human 每次重新判断。**
+
+Human 不应该一直回答：
+
+```text
+可以 Review 了。
+可以返工了。
+可以进入下一 Task 了。
+```
+
+这些如果已经是项目协议的一部分，就应该由 Runtime 自己完成。
+
+---
+
+# 十、Human 的位置开始发生变化
+
+于是 Human 从：
+
+```text
+Task Scheduler
+```
+
+逐渐变成：
+
+```text
+Product Owner
+Architecture Owner
+Boundary Owner
+Exception Handler
+```
+
+正常施工：
+
+```text
+Task
+↓
+Worker
+↓
+Reviewer
+↓
+Next Task
+```
+
+Human 不进入。
+
+只有出现：
+
+```text
+需求不明确
+设计冲突
+架构问题
+无法收敛
+需要改变冻结决策
+高风险动作
+```
+
+才重新把控制权交回来。
+
+所以目标不是：
+
+> Human 不参与。
+
+而是：
+
+> **Human 不参与已经能够由规则处理的正常状态转换。**
+
+---
+
+# 十一、Human Control 变成 Runtime Control
+
+Human 仍然需要拥有最终控制权。
+
+但控制方式不应该是不断进入内部施工。
+
+更合理的是：
+
+```text
+START
+PAUSE
+RESUME
+STOP
+OVERRIDE
+```
+
+例如：
+
+> 当前工作完成以后暂停。
+
+Runtime 记录：
+
+```text
+pause_requested = true
+```
+
+当前工作完成以后：
+
+```text
+检查 Human Control
+↓
+PAUSE
+↓
+不领取下一 Task
+```
+
+Human 控制的是：
+
+> **Runtime 生命周期。**
+
+而不是：
+
+> 每一次内部 Action。
+
+---
+
+# 十二、Review 也不能无限循环
+
+自治以后，一个新的风险是：
+
+```text
+Worker
+↓
+Reviewer FAIL
+↓
+Worker
+↓
+Reviewer FAIL
+↓
+Worker
+↓
+Reviewer FAIL
+↓
+...
+```
+
+如果 Human 不再每轮介入，就必须给自治设置边界。
+
+例如：
+
+```text
+review_attempt = 3
+max_review_attempts = 3
+```
+
+达到上限：
+
+```text
+HUMAN_REQUIRED
+↓
+STOP
+```
+
+因为连续失败本身已经产生了新信息。
+
+问题可能已经不是：
+
+> 再改一次代码。
+
+而可能是：
+
+```text
+Task 定义错误
+Acceptance 冲突
+架构理解不同
+Reviewer 标准不合理
+当前方案无法实现
+```
+
+所以：
+
+> **自治必须有边界。**
+
+---
+
+# 十三、测试也应该进入施工协议
+
+第一代里 Human 很容易不断说：
+
+> 跑一下测试。
+
+但如果施工阶段已经自治，测试什么时候运行也应该提前确定。
+
+例如：
+
+```text
+普通修改
+→ Targeted Test
+
+共享模块变化
+→ Impact Regression
+
+阶段完成
+→ Integration Test
+
+最终完成
+→ Full Regression
+```
+
+这样 Worker 和 Reviewer 不需要每次询问 Human：
+
+> 现在要不要跑测试？
+
+测试成为 Runtime Contract 的一部分。
+
+---
+
+# 十四、第二代真正改变的是控制权
+
+如果把第一代和第二代放在一起：
+
+```text
+第一代
+
+Human
+↓
+Task
+↓
+Agent
+↓
+Human
+↓
+Next Task
+```
+
+第二代：
+
+```text
+Human
+↓
+Frozen Design
+↓
+Runtime
+├── Control
+├── Worker
+└── Reviewer
+↓
+Product
+↓
+Human
+```
+
+真正变化的不是：
+
+> 一个 Agent 变成了三个 Agent。
+
+而是：
+
+> **Human 把一部分正常控制权交给了 Runtime。**
+
+这也是我第一次真正开始理解：
+
+```text
+Implementation
+```
+
+和：
+
+```text
+Runtime Control
+```
+
+并不是同一件事。
+
+---
+
+# 十五、自动化并不是免费的
+
+第二代最大的好处很明显：
+
+> Human 不需要一直守着项目。
+
+但是实际运行以后，我也开始感受到它的另一面。
+
+第一代路径通常非常清楚：
+
+```text
+T01
+↓
+Human
+↓
+T02
+↓
+Human
+↓
+T03
+```
+
+我几乎始终知道系统正在做什么。
+
+第二代变成：
+
+```text
+Control
+↓
+读取 State
+↓
+Worker
+↓
+读取 Project / Contract
+↓
+实现
+↓
+测试
+↓
+Reviewer
+↓
+再次读取 Project / Contract
+↓
+验证
+↓
+可能返工
+↓
+Control
+↓
+Next Task
+```
+
+Human 操作减少了。
+
+但内部步骤增加了。
+
+每个 Agent 都需要重新建立上下文。
+
+每次 Review、Replan、Retry 都需要额外推理。
+
+于是一个非常现实的问题出现：
+
+> **自治减少了 Human Attention，却增加了 Runtime Cost。**
+
+最直接的表现就是 Token 消耗明显增加。
+
+---
+
+# 十六、路径也开始变得不可见
+
+第一代里：
+
+```text
+我启动 T04
+```
+
+所以我天然知道：
+
+> 现在正在做 T04。
+
+第二代里 Human 可能只看到：
+
+```text
+START
+```
+
+然后 Runtime 内部：
+
+```text
+Task
+↓
+Worker
+↓
+Reviewer
+↓
+Retry
+↓
+Reviewer
+↓
+Next Task
+↓
+Worker
+...
+```
+
+如果不主动查看 State 和 Trace，我并不知道它具体运行到了哪里。
+
+所以自治带来的交换关系开始变得明显：
+
+```text
+Human 操作减少
+        ↓
+Automation 增加
+
+但同时：
+
+Path Visibility 下降
+Runtime Cost 上升
+Token Predictability 下降
+Debug Difficulty 上升
+```
+
+这并不说明自治错误。
+
+只是说明：
+
+> **自动化本身也有成本。**
+
+---
+
+# 十七、第一代因此没有失效
+
+做到这里以后，我反而重新理解了第一代。
+
+如果：
+
+```text
+任务明确
+路径明确
+项目不长
+Human 希望理解每一步
+Token 成本敏感
 ```
 
 那么：
 
 ```text
-Worker
-  ↓
-Execute
-  ↓
-Test
-  ↓
-Reviewer
-  ↓
-PASS
-  ↓
-DONE
+Human-Controlled TaskList
 ```
 
-Human 可以完全不进入。
+可能反而更加简单。
 
-甚至具体实现只有 70 分，只要：
+如果：
 
 ```text
-功能正确
-接口正确
-测试稳定
-没有危险副作用
+项目很长
+Task 很多
+正常 Transition 高度重复
+Human 调度已经成为主要成本
 ```
 
-V1 都可以接受。
+那么才值得把更多控制权交给 Runtime。
 
-因为当前目标可能只是：
-
-> **先让系统正确跑通。**
-
-代码质量、性能、抽象优雅程度可以成为未来独立的 Optimization Task。
-
----
-
-# 三十八、MEDIUM：不一定看代码，但必须确认正确性定义
-
-有一些代码不会删除文件、不会破坏数据库，却仍然存在很大风险。
-
-例如：
+所以：
 
 ```text
-Rule Retrieval
-Result Validate
-Context Builder边界
-LLM Judge Prompt
-Batch Terminal Condition
-State Transition
-Pause / Resume
-权限判断
+第一代
+≠ 落后
+
+第二代
+≠ 更高级
 ```
 
-它们最大的风险叫：
+它们交换的是不同的成本。
 
-> **Silent Failure。**
-
-例如：
+第一代支付：
 
 ```text
-程序正常运行
-↓
-没有Exception
-↓
-测试如果覆盖不足也可能PASS
-↓
-输出格式完全正常
-↓
-但业务结果是错的
+Human Attention
 ```
 
-因此这种任务 Human 不一定需要逐行 Review Implementation。
-
-Human 更应该 Review：
+换取：
 
 ```text
-Specification
-Business Rule
-Acceptance
-Edge Cases
-Regression Fixtures
-Architecture Decision
-```
-
-然后让 Reviewer 验证实现是否符合这些标准。
-
-也就是：
-
-> **Human Review Specification，Agent Review Implementation。**
-
----
-
-# 三十九、HIGH：Human 必须保留 Gate
-
-某些操作即使自动测试全部 PASS，也不能完全交给 Agent 自治。
-
-例如：
-
-```text
-删除文件
-覆盖原始数据
-递归目录操作
-
-Shell / subprocess
-系统命令执行
-
-DROP / DELETE
-生产数据库修改
-
-生产部署
-
-权限修改
-
-Secret / API Key
-
-认证授权
-
-外部系统写操作
-
-Git reset --hard
-force push
-
-自动修改业务规则
-```
-
-这些操作的共同特点不是“代码复杂”。
-
-而是：
-
-> **错误会改变真实世界状态，而且恢复成本可能很高。**
-
-因此应该：
-
-```text
-Worker Plan
-    ↓
-Human Gate
-    ↓
-Execute
-    ↓
-Reviewer
-    ↓
-Human / Policy Gate
-```
-
----
-
-# 四十、Read 也不是天然安全
-
-不能简单认为：
-
-```text
-Read = 安全
-Write = 有风险
-Delete = 危险
-```
-
-普通：
-
-```text
-read CSV
-read JSON
-read config
-```
-
-确实风险很低。
-
-但：
-
-```text
-读取.env
-读取SSH Key
-读取Cookie
-读取用户隐私
-读取生产数据库
-读取公司机密
-↓
-发送给外部LLM/API
-```
-
-虽然没有删除任何东西，却可能造成严重问题。
-
-因此还需要一个基础安全模型：
-
-```text
-Confidentiality
-机密性
-
-Integrity
-完整性
-
-Availability
-可用性
-```
-
-也就是常见的 CIA 三要素。
-
-对于 Coding Agent，我可以把它简单理解成：
-
-```text
-它有没有看到不应该看的？
-
-它有没有修改不应该修改的？
-
-它有没有让本来可用的东西不可用了？
-```
-
----
-
-# 四十一、Human Attention 本身也是稀缺资源
-
-以前容易认为：
-
-> Review 越多越安全。
-
-但实际上：
-
-```text
-大量低风险代码
-        ↓
-Human全部Review
-        ↓
-注意力消耗
-        ↓
-真正高风险代码出现
-        ↓
-Human已经疲劳
-```
-
-因此更合理的是：
-
-```text
-1000行普通Parser
-→ Tests + Reviewer
-
-20行生产数据库删除逻辑
-→ Human重点Review
-
-业务规则
-→ Human确认Specification
-
-Architecture
-→ Human确认Decision
-
-普通Implementation
-→ AI自治
-```
-
-因此：
-
-> **Human Attention 应该按照风险，而不是按照代码量分配。**
-
----
-
-# 四十二、把 Risk Level 写进 Task
-
-未来每个 Task 都可以增加：
-
-```text
-## Risk Level
-
-LOW / MEDIUM / HIGH
-
-## Side Effects
-
-Read:
-...
-
-Write:
-...
-
-Delete:
-...
-
-External:
-...
-
-Secrets:
-...
-
-Production:
-...
-
-## Human Gate
-
-Required:
-YES / NO
-
-Reason:
-...
-```
-
-例如：
-
-```text
-Task:
-T08 Context Builder
-
-Risk:
-MEDIUM
-
-Side Effects:
-Read article context
-Write result JSONL
-
-Delete:
-None
-
-External:
-None
-
-Human Gate:
-Specification Review Only
-```
-
-另一个：
-
-```text
-Task:
-T20 Cleanup Cache
-
-Risk:
-HIGH
-
-Side Effects:
-Delete cache directory
-
-Human Gate:
-REQUIRED
-```
-
----
-
-# 四十三、Lead 和 Reviewer 都要参与风险判断
-
-不能只让 Lead 判断：
-
-```text
-Lead：
-“我觉得这是LOW。”
-
-↓
-直接执行
-```
-
-应该：
-
-```text
-Lead
-↓
-Initial Risk Classification
-↓
-Worker
-↓
-Reviewer
-↓
-Risk Verification
-```
-
-Reviewer 再检查：
-
-```text
-Does this change:
-
-[ ] Delete data?
-[ ] Overwrite files?
-[ ] Execute shell?
-[ ] Modify database?
-[ ] Access secrets?
-[ ] Transmit sensitive data?
-[ ] Change permissions?
-[ ] Deploy production?
-[ ] Change business rules?
-[ ] Change architecture?
-[ ] Introduce external side effects?
-```
-
-如果发现 Lead 低估风险：
-
-```text
-LOW
-↓
-Reviewer发现危险操作
-↓
-RISK_ESCALATION
-↓
-Lead
-↓
-Human
-```
-
-Reviewer 不能自行放行。
-
----
-
-# 四十四、Risk-based Multi-Agent Workflow
-
-加入 Risk Gate 后，原来的：
-
-```text
-Lead
- ↓
-Worker
- ↓
-Reviewer
- ↓
-Lead
-```
-
-变成：
-
-```text
-                         Lead
-                           │
-                     Plan / Replan
-                           │
-                    Risk Classification
-                           │
-          ┌────────────────┼────────────────┐
-          │                │                │
-         LOW             MEDIUM            HIGH
-          │                │                │
-          ↓                ↓                ↓
-       Worker           Worker        Human Plan Gate
-          │                │                │
-          ↓                ↓                ↓
-        Test             Test            Worker
-          │                │                │
-          ↓                ↓                ↓
-      Reviewer          Reviewer          Test
-          │                │                │
-          ↓                ↓                ↓
-        PASS        Strong Verification  Reviewer
-          │                │                │
-          │           ┌────┴────┐           ↓
-          │         PASS       FAIL      Human Gate
-          │           │          │           │
-          └───────────┼──────────┴───────────┘
-                      │
-                      ↓
-                    Lead
-                      │
-              ┌───────┴───────┐
-              │               │
-            DONE            REPLAN
-              │               │
-              ↓               └────→ Worker
-          Next Task
-```
-
-这时候 Human 不再是普通审批节点。
-
-Human 变成：
-
-> **Risk Owner。**
-
----
-
-# 四十五、最终目标：Human 从正常控制环退出
-
-最开始：
-
-```text
-Worker
- ↓
-Human
- ↓
-Worker
- ↓
-Human
- ↓
-Worker
-```
-
-Multi-Agent 以后：
-
-```text
-              NORMAL PATH
-
-                 Lead
-                  ↓
-                 Plan
-                  ↓
-                Worker
-                  ↓
-                 Test
-                  ↓
-               Reviewer
-                ↙    ↘
-             PASS    FAIL
-              ↓       ↓
-            DONE    Replan
-              ↓       │
-          Next Task ←─┘
-```
-
-Human 只存在于异常路径：
-
-```text
-             EXCEPTION PATH
-
-Architecture Change ──┐
-Business Rule Change ─┤
-High Risk Operation ──┤
-Security Issue ───────┤
-Requirement Ambiguity ├──→ HUMAN
-Agent Conflict ───────┤
-Production Change ────┤
-Irreversible Action ──┘
-```
-
-最终目标不是：
-
-> Human 不参与项目。
-
-而是：
-
-> **Human 不再参与每一次正常状态转换。**
-
----
-
-# 四十六、Multi-Agent Coding 系统全景图
-
-下面这张图是整套体系最值得长期保存的一张。
-
-它可以叫：
-
-> **Multi-Agent Coding Architecture & Control Flow**
-
-也可以简单叫：
-
-> **AI Coding 多 Agent 系统全景图**
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│                         HUMAN OWNER                          │
-│                                                              │
-│  Product Goal │ Business Rules │ Architecture │ Risk Policy │
-│                                                              │
-│  Human只处理：                                                │
-│  · Architecture Change                                       │
-│  · Business Rule Change                                      │
-│  · Security / Secret                                         │
-│  · Production                                                │
-│  · Irreversible Action                                       │
-│  · Requirement Ambiguity                                     │
-└──────────────────────────────┬───────────────────────────────┘
-                               │
-                               │ Policy / Decision
-                               ↓
-┌──────────────────────────────────────────────────────────────┐
-│                    SHARED PROJECT KNOWLEDGE                  │
-│                                                              │
-│  PRODUCT.md     WHAT      做什么 / 什么叫正确                 │
-│  SYSTEM.md      HOW       系统怎么设计                        │
-│  DECISIONS.md   WHY       为什么这样设计                      │
-│  CONTRACTS.md   INTERFACE 模块之间怎么连接                    │
-│                                                              │
-│  config/        可调假设                                      │
-│  tests/         正确性证据                                    │
-└──────────────────────────────┬───────────────────────────────┘
-                               │
-                               ↓
-                    ┌───────────────────┐
-                    │    LEAD AGENT     │
-                    │                   │
-                    │   Plan / Replan   │
-                    │   Dependency      │
-                    │   Risk Classify   │
-                    │   Dispatch        │
-                    └─────────┬─────────┘
-                              │
-                       Create / Assign
-                              ↓
-┌──────────────────────────────────────────────────────────────┐
-│                         TASK LAYER                           │
-│                                                              │
-│ tasks/Txxx.md                                                │
-│                                                              │
-│ Goal                                                         │
-│ Input / Output                                               │
-│ Contract                                                     │
-│ Scope / Out of Scope                                         │
-│ Acceptance                                                   │
-│ Tests                                                        │
-│ Allowed / Forbidden Files                                    │
-│ Risk Level                                                   │
-│ Side Effects                                                 │
-│ Human Gate                                                   │
-└──────────────────────────────┬───────────────────────────────┘
-                               │
-                               ↓
-                       ┌──────────────┐
-                       │ WORKER AGENT │
-                       │              │
-                       │   Execute    │
-                       │   Test       │
-                       │   Commit     │
-                       └──────┬───────┘
-                              │
-                         Evidence
-                              │
-                              ↓
-                       ┌──────────────┐
-                       │REVIEWER AGENT│
-                       │              │
-                       │ Acceptance   │
-                       │ Tests        │
-                       │ Diff         │
-                       │ Risk         │
-                       │ Drift        │
-                       └──────┬───────┘
-                              │
-                    ┌─────────┴─────────┐
-                    │                   │
-                  PASS                 FAIL
-                    │                   │
-                    ↓                   ↓
-                  Lead                Lead
-                    │                   │
-                  DONE               Replan
-                    │                   │
-                    │             Revision Task
-                    │                   │
-                    │                   ↓
-                    │                Worker
-                    │                   │
-                    │               Reviewer
-                    │                   │
-                    └─────────┬─────────┘
-                              │
-                              ↓
-                         NEXT TASK
-```
-
-但上面还只是**控制流**。
-
-三个独立 Agent 真正能够协作，还需要下面这个共享状态层：
-
-```text
-┌──────────────────────────────────────────────────────────────┐
-│                    SHARED SOURCE OF TRUTH                    │
-│                                                              │
-│  state/                                                      │
-│  ├── project.yaml       当前项目状态                          │
-│  └── tasks/*.yaml       当前Task状态                          │
-│                                                              │
-│  logs/                                                       │
-│  └── events.jsonl       所有状态变化历史                      │
-│                                                              │
-│  reviews/                                                    │
-│  └── Txxx-Rx.md         Reviewer证据                          │
-│                                                              │
-│  Git                                                         │
-│  └── Commit             Worker交付的不可变代码锚点            │
-│                                                              │
-│  CHANGELOG.md                                                │
-│  └── 工程决策与修改历史                                      │
-└──────────────────────────────────────────────────────────────┘
-```
-
-因此完整关系实际上是：
-
-```text
-                        HUMAN
-                          │
-                       Policy
-                          │
-                          ↓
-                    PROJECT DOCS
-                          │
-                          ↓
-                        LEAD
-                          │
-                    Plan / Replan
-                          │
-                          ↓
-                         TASK
-                          │
-                   Risk Classification
-                          │
-             ┌────────────┼────────────┐
-             │            │            │
-            LOW         MEDIUM        HIGH
-             │            │            │
-             │            │       HUMAN GATE
-             │            │            │
-             └────────────┼────────────┘
-                          ↓
-                       WORKER
-                          │
-                 Execute + Test
-                          │
-                          ↓
-                     GIT COMMIT
-                          │
-                          ↓
-                      REVIEWER
-                          │
-            ┌─────────────┼─────────────┐
-            │             │             │
-          PASS           FAIL      RISK ESCALATION
-            │             │             │
-            ↓             ↓             ↓
-           LEAD          LEAD          HUMAN
-            │             │
-           DONE         REPLAN
-            │             │
-            │             ↓
-            │         REVISION TASK
-            │             │
-            │             ↓
-            │           WORKER
-            │             │
-            │         REVIEWER
-            │             │
-            └───────┬─────┘
-                    ↓
-                 NEXT TASK
-
-
-整个过程中所有角色共同读写：
-
-              ┌────────────────────┐
-              │ SOURCE OF TRUTH    │
-              │                    │
-              │ Current State      │
-              │ Event Log          │
-              │ Task               │
-              │ Review Evidence    │
-              │ Git Commit         │
-              │ Tests              │
-              │ Changelog          │
-              └────────────────────┘
-```
-
----
-
-# 四十七、最后把整个体系压缩成一棵树
-
-如果未来我忘了所有文件名，只需要回来查看这棵树：
-
-```text
-AI-Native Software Engineering
-│
-├── 1. Knowledge：项目是什么？
-│   │
-│   ├── WHAT
-│   │   └── PRODUCT.md
-│   │
-│   ├── HOW
-│   │   └── SYSTEM.md
-│   │
-│   └── WHY
-│       └── DECISIONS.md
-│
-├── 2. Contract：大家怎么连接？
-│   │
-│   └── INTERFACE
-│       └── CONTRACTS.md
-│
-├── 3. Role：谁负责什么？
-│   │
-│   ├── CONTROL
-│   │   └── LEAD.md
-│   │
-│   ├── EXECUTION
-│   │   └── WORKER.md
-│   │
-│   └── VERIFICATION
-│       └── REVIEWER.md
-│
-├── 4. Work：现在做什么？
-│   │
-│   └── TASK
-│       ├── Goal
-│       ├── Scope
-│       ├── Out of Scope
-│       ├── Input / Output
-│       ├── Acceptance
-│       ├── Test
-│       └── Risk
-│
-├── 5. Coordination：怎么协作？
-│   │
-│   └── PROTOCOL.md
-│       │
-│       ├── Plan
-│       ├── Execute
-│       ├── Verify
-│       └── Replan
-│
-├── 6. State：现在在哪里？
-│   │
-│   ├── Current State
-│   │   └── state/*
-│   │
-│   └── Event History
-│       └── events.jsonl
-│
-├── 7. Evidence：凭什么说它是对的？
-│   │
-│   ├── tests/
-│   ├── fixtures/
-│   ├── reviews/
-│   └── Git Commit
-│
-├── 8. Risk：哪些事情AI不能自己决定？
-│   │
-│   ├── LOW
-│   │   └── Agent Autonomous
-│   │
-│   ├── MEDIUM
-│   │   └── Strong Agent Review
-│   │
-│   └── HIGH
-│       └── Human Gate
-│
-├── 9. History：为什么变成现在这样？
-│   │
-│   ├── CHANGELOG.md
-│   ├── Git History
-│   └── Review History
-│
-└── 10. Human：人最终负责什么？
-    │
-    ├── Product Goal
-    ├── Business Rules
-    ├── Architecture Boundary
-    ├── Risk Policy
-    ├── Security
-    ├── Irreversible Operations
-    └── Exception Decision
-```
-
----
-
-# 四十八、现在我对 Vibecoding 的理解
-
-最开始我以为：
-
-> Vibecoding = 我描述需求，AI 帮我写代码。
-
-后来变成：
-
-> Vibecoding = 我设计，AI 实现，我 Review。
-
-再继续发展：
-
-> Vibecoding = 我定义目标、边界、正确性和风险，让多个 Agent 在明确的权限、状态、协议和验证机制下完成工程循环。
-
-所以最终：
-
-```text
-Human
-负责：
-Goal
-Boundary
-Policy
-Risk
-Exception
-
-Lead
-负责：
-Plan
+Visibility
+Predictability
 Control
-Replan
+```
 
+第二代支付更多：
+
+```text
+Token
+Runtime Complexity
+Observability Cost
+```
+
+换取：
+
+```text
+Autonomy
+Human Attention
+Long-running Capability
+```
+
+我开始意识到：
+
+> **自治也必须获得存在资格。**
+
+---
+
+# 十八、但第二代还暴露出了一个更具体的问题
+
+到这里，逻辑上的 Runtime 已经基本成立。
+
+State 可以告诉系统：
+
+```text
+current_role = WORKER
+```
+
+Worker 完成以后可以写：
+
+```text
+next_role = REVIEWER
+```
+
+控制逻辑也可以知道：
+
+```text
+WORK_DONE
+→ REVIEWER
+```
+
+但是实际运行时，我发现这里隐藏着一个一直没有被区分的问题：
+
+> **知道下一步是谁，不等于能够把下一步的人叫起来。**
+
+如果 Worker 和 Reviewer 是两个彼此独立的 AI Session：
+
+```text
+Worker Session
+
+Reviewer Session
+```
+
+那么 Worker 即使知道：
+
+```text
+next = REVIEWER
+```
+
+Reviewer 也不会因此自动开始运行。
+
+逻辑世界里：
+
+```text
 Worker
-负责：
-Execute
-
+↓
 Reviewer
-负责：
-Verify
-
-System
-负责：
-State
-Protocol
-Evidence
-History
 ```
 
-其中一个非常重要的变化是：
-
-> **我不需要知道每一行代码是怎么写的，我需要知道为什么可以相信它。**
-
-对于低风险、可验证、可逆的实现：
+物理世界里却仍然可能是：
 
 ```text
-Tests + Reviewer + Git
+Worker 完成
+↓
+等待
+↓
+Human 打开 Reviewer Session
+↓
+Reviewer 才真正开始
 ```
 
-就是证据。
+---
 
-对于业务核心：
+# 十九、如果强行回到 Control，也会出现新的成本
+
+一种很自然的想法是：
 
 ```text
-Specification + Acceptance + Regression
+Control
+↓
+Worker
+↓
+Control
+↓
+Reviewer
+↓
+Control
+↓
+Next
 ```
 
-是我需要关注的东西。
+逻辑上非常漂亮。
 
-对于高风险操作：
+但如果：
 
 ```text
-Human Gate
+Control
+Worker
+Reviewer
 ```
 
-仍然保留。
+本身就是三个独立 Session，那么 Human 实际操作会变成：
 
-因此最终追求的并不是：
+```text
+打开 Control
+↓
+打开 Worker
+↓
+打开 Control
+↓
+打开 Reviewer
+↓
+打开 Control
+```
 
-> AI 写了多少代码。
+为了让逻辑上的控制中心始终存在，反而增加了物理 Session 切换。
 
-而是：
+这时候我才发现：
 
-> **有多少工程决策可以安全地从人的日常控制循环中移出去，同时仍然保持可验证、可追踪、可恢复、可控制。**
+> **我一直把“决定下一步”和“真正启动下一步”当成了同一件事。**
 
-这可能才是我目前理解的 AI-Native Software Engineering 的核心。
+其实它们是两个问题。
 
-后续补充：这里讨论的 Human → Agent → State Machine → Graph Runtime，主要描述的是“控制权如何下沉”，也就是系统如何决定下一步应该执行什么。实际运行时还有另一层问题：如果多个 Agent 是彼此独立的 Session，State 即使已经确定 next = Reviewer，也不意味着系统拥有自动唤醒 Reviewer 的能力。这个 Agent Lifecycle / Wake-up 问题并不否定这里的 Runtime 演进，而是后来单独暴露出的执行边界，将在下一篇继续讨论。
+---
+
+# 二十、第二次实践停在这里
+
+第二代解决了第一代暴露的问题：
+
+```text
+Human 每个 Task 都要回来
+```
+
+于是我建立了：
+
+```text
+Shared Project
++
+Markdown Contract
++
+Shared State
++
+Control / Worker / Reviewer
++
+Bounded Review
++
+Human Runtime Control
+```
+
+Human 开始退出正常施工循环。
+
+但是实际运行又暴露出了新的边界：
+
+```text
+Logical Transition
+≠
+Physical Wake-up
+```
+
+State 可以知道：
+
+> 下一步是 Reviewer。
+
+Runtime Contract 可以规定：
+
+> Worker 完成后进入 Review。
+
+但如果 AI 软件本身没有跨 Session 启动能力：
+
+> **谁真正把 Reviewer 叫起来？**
+
+继续解决这个问题当然可以加入：
+
+```text
+CLI
+API
+Queue
+Polling
+Process Manager
+Desktop Automation
+```
+
+但这样又会产生新的复杂度。
+
+而如果当前 AI 软件本身支持：
+
+```text
+Host
++
+SubAgent
+```
+
+问题又完全不同。
+
+于是我开始意识到：
+
+> 也许问题不是继续寻找一种“最强的 Multi-Agent Runtime”。
+
+真正应该拆开的，是：
+
+```text
+协作协议
+↓
+控制逻辑
+↓
+物理执行方式
+```
+
+同一套协作协议，在不同 AI 环境下，也许本来就应该采用不同的执行方式。
+
+这成为第三次重新设计 Vibe Coding 方法的起点。
