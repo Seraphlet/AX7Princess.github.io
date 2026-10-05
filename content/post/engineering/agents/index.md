@@ -3,7 +3,7 @@ description: ""
 title: "第二次 Vibe Coding：把 Human 从施工循环里移出去"
 draft: false
 date: "2026-09-27T05:39:46+08:00"
-slug: "VibeCodingOne"
+slug: "VibeCodingTwo"
 categories:
  - VibeCoding
 tags:
