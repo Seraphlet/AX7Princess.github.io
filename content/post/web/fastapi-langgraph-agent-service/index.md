@@ -7,7 +7,7 @@ slug: "fastapi-langgraph-agent-service"
 categories:
  - FastAPI
 tags:
- - 
+ - null
 image: ""
 ---
 
@@ -1325,11 +1325,4 @@ Day2 则把原本独立运行的 LangGraph 接入 HTTP 服务。
 
 这就是 W10 前两天建立起来的完整知识骨架。
 
----
 
-**源码**
-
-- [W10-Day1：FastAPI 基础](https://github.com/Seraphlet/AgentLearn/tree/main/W10/w10-day1)
-- [W10-Day2：FastAPI + LangGraph](https://github.com/Seraphlet/AgentLearn/tree/main/W10/w10-day2)
-
-**建议博客 Slug**：`fastapi-langgraph-agent-service`
