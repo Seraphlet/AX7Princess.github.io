@@ -3,14 +3,13 @@ description: ""
 title: "条件边"
 draft: false
 date: "2026-09-05T07:47:33+08:00"
-slug: "LangGraphd2"
+slug: "LangGraph-Condiction"
 categories:
  - LangGraph
 tags:
  - null
 image: ""
 ---
-
 
 # W5-D2 · 条件边：让图自己选路
 
