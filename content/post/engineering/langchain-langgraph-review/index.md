@@ -8,11 +8,12 @@ categories:
  - Review
  - Agent
 tags:
- - 
+ - null
 image: ""
 ---
 
 # LangChain × LangGraph 记忆恢复：从模型调用到 Agent Runtime
+![1](1.webp)
 
 > **定位**：个人学习复盘笔记  
 > **范围**：W4 LangChain 基础 + W5–W7 LangGraph 与 Agent 工程  
@@ -1839,5 +1840,3 @@ Reducer
 **输入 → 调用 → 输出 → 下一步。**
 
 这就是这次 LangChain × LangGraph 记忆恢复最重要的主线。
-
-
